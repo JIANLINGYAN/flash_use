@@ -276,34 +276,87 @@
     var c = els.wearCanvas, ctx = c.getContext("2d");
     var W = c.width, H = c.height;
     ctx.clearRect(0, 0, W, H);
+
     var n = wearmap.length;
-    var bw = W / n;
-    if (bw > 14) bw = 14;
+    /* GitHub 风格方块热力图：自动计算列数，每块约 12~14px */
+    var cellSize = 13;
+    var gap = 3;
+    var cols = Math.floor((W - 20) / (cellSize + gap));
+    if (cols < 4) cols = 4;
+    var rows = Math.ceil(n / cols);
+    var gridH = rows * (cellSize + gap) + 40;
+    if (gridH > H) c.height = gridH;
+
     for (var i = 0; i < n; i++) {
       var v = wearmap[i];
       var ratio = max > 0 ? v / max : 0;
-      var hue = 120 - 120 * Math.min(1, ratio);
-      var light = 38 + 22 * (1 - Math.min(1, ratio));
-      ctx.fillStyle = "hsl(" + hue + ",75%," + light + "%)";
-      var h = Math.max(2, (v / max) * (H - 30));
-      ctx.fillRect(Math.round(i * bw), Math.round(H - h - 26), Math.ceil(bw - 1), Math.round(h));
-      ctx.fillStyle = "#5b6678";
+      /* GitHub 贡献图配色：5 级 */
+      var hue, sat, lgt;
+      if (ratio === 0)       { hue = 210; sat = "10%"; lgt = "22%"; }
+      else if (ratio < 0.25) { hue = 130; sat = "55%"; lgt = "42%"; }
+      else if (ratio < 0.50) { hue = 100; sat = "65%"; lgt = "38%"; }
+      else if (ratio < 0.75) { hue = 45;  sat = "75%"; lgt = "44%"; }
+      else                   { hue = 5;   sat = "70%"; lgt = "42%"; }
+
+      ctx.fillStyle = "hsl(" + hue + "," + sat + "," + lgt + ")";
+      var col = i % cols;
+      var row = Math.floor(i / cols);
+      var x = 10 + col * (cellSize + gap);
+      var y = 10 + row * (cellSize + gap);
+      roundRect(ctx, x, y, cellSize, cellSize, 2);
+
+      ctx.fillStyle = ratio > 0.6 ? "#fff" : "#8b97ad";
       ctx.font = "9px sans-serif";
-      if (bw >= 10) ctx.fillText(String(i), Math.round(i * bw), H - 16);
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      if (v > 0 && cellSize >= 11)
+        ctx.fillText(String(v), x + cellSize / 2, y + cellSize / 2);
     }
-    var grad = ctx.createLinearGradient(0, 0, 160, 0);
-    grad.addColorStop(0, "hsl(120,75%,48%)");
-    grad.addColorStop(0.5, "hsl(60,75%,48%)");
-    grad.addColorStop(1, "hsl(0,75%,48%)");
-    ctx.fillStyle = grad;
-    ctx.fillRect(6, H - 12, 160, 8);
+
+    /* 底部图例 */
+    var ly = rows * (cellSize + gap) + 18;
+    var levels = [
+      [0,   "#1e2a3a", "0"],
+      [0.15,"#7ec86e", "低"],
+      [0.4, "#56a33b", "中低"],
+      [0.65,"#d4a72c", "中高"],
+      [1,   "#e05555", "高"],
+    ];
+    var lw = 36, lx = 10;
+    for (var li = 0; li < levels.length; li++) {
+      ctx.fillStyle = levels[li][1];
+      roundRect(ctx, lx, ly, lw, 12, 3);
+      ctx.fillStyle = "#8b97ad";
+      ctx.font = "10px sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText(levels[li][2], lx + lw / 2, ly + 24);
+      lx += lw + 8;
+    }
+    ctx.textAlign = "left";
     ctx.fillStyle = "#8b97ad";
     ctx.font = "11px sans-serif";
-    ctx.fillText("低", 6, H - 16);
-    ctx.fillText("高", 150, H - 16);
-    ctx.fillText("块数=" + n + "  最高擦写=" + max, 180, H - 12);
-    els.wearLegend.textContent = "每块均有颜色：绿(低磨损)→黄→红(接近寿命上限)，柱高表示擦写次数。";
+    ctx.fillText("共 " + n + " 块 · 最高擦写 " + max + " 次", lx + 10, ly + 16);
+
+    els.wearLegend.textContent =
+      "GitHub 风格热力图：每个方块代表一个擦除块，颜色越深表示磨损越高。";
     els.wearWrap.classList.remove("hidden");
+  }
+
+  /* 辅助：圆角矩形 */
+  function roundRect(ctx, x, y, w, h, r) {
+    r = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.arcTo(x + w, y, x + w, y + r, r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.arcTo(x + w, y + h, x + h - r, y + h, r);
+    ctx.lineTo(x + r, y + h);
+    ctx.arcTo(x, y + h, x, y + h - r, r);
+    ctx.lineTo(x, y + r);
+    ctx.arcTo(x, y, x + r, y, r);
+    ctx.closePath();
+    ctx.fill();
   }
 
   function runTest() {
