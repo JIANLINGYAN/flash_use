@@ -30,7 +30,22 @@
     importFile: document.getElementById("import-file"),
     importBtn: document.getElementById("import-btn"),
     importOutput: document.getElementById("import-output"),
+    fwTitle: document.getElementById("fw-title"),
+    fwDesc: document.getElementById("fw-desc"),
   };
+
+  /* 标签页切换 */
+  function showTab(name) {
+    document.querySelectorAll(".tab").forEach(function (t) {
+      t.classList.toggle("active", t.getAttribute("data-tab") === name);
+    });
+    document.querySelectorAll(".tab-panel").forEach(function (p) {
+      p.classList.toggle("active", p.id === "tab-" + name);
+    });
+  }
+  document.querySelectorAll(".tab").forEach(function (t) {
+    t.onclick = function () { showTab(t.getAttribute("data-tab")); };
+  });
 
   function setPill(state, text) {
     els.pill.className = "pill pill-" + state;
@@ -58,12 +73,12 @@
   function renderList() {
     els.list.innerHTML = "";
     frameworks.forEach(function (f) {
-      var card = document.createElement("button");
-      card.className = "framework-card" + (f.id === selectedId ? " selected" : "");
-      card.innerHTML = '<div class="fc-name">' + f.name + "</div>" +
-                       '<div class="fc-desc">' + (f.desc || "") + "</div>";
-      card.onclick = function () { select(f.id); };
-      els.list.appendChild(card);
+      var item = document.createElement("button");
+      item.className = "fw-item" + (f.id === selectedId ? " selected" : "");
+      item.innerHTML = '<span class="fw-dot"></span><span class="fw-name">' + f.name + "</span>";
+      item.title = f.desc || "";
+      item.onclick = function () { select(f.id); };
+      els.list.appendChild(item);
     });
   }
 
@@ -79,7 +94,11 @@
     renderList();
     els.runBtn.disabled = false;
     els.meta.textContent = "已选：" + (nameOf(id) || id);
+    var f = selectedFramework();
+    els.fwTitle.textContent = f ? f.name : id;
+    els.fwDesc.textContent = f ? (f.desc || "") : "";
     renderConfigForm();
+    showTab("run");
   }
 
   function nameOf(id) {
