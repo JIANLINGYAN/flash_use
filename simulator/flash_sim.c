@@ -9,49 +9,63 @@
  *  - EEPROM：支持任意地址直接覆盖写（字节级），无 erase 概念。
  *  - erase 将整块置 0xFF，并累计擦写次数；超过寿命则后续 erase 失败。
  *
- * 兼容性：纯 C99 + 标准库，Windows(Linux 同理) 可直接编译运行。
+ * 可配置性能指标（flash_config_t）：
+ *  - read_us / write_us / erase_us：每次操作的模拟耗时（微秒），用于性能统计。
+ *  - bad_blocks / bad_ratio：坏块数量与运行时坏块比率，模拟 NAND 坏块特性。
+ *
+ * 统计与可视化：flash_sim_get_stats 暴露读写擦耗时与磨损概况；
+ *              flash_sim_get_wear_map 暴露每块擦写次数，供前端绘制磨损热力图。
+ *
+ * 兼容性：纯 C99 + 标准库，Linux/Windows 可直接编译运行。
  */
 
 #include "flash_sim.h"
 
-#define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
 
 /* 部分平台/编译器未通过 feature macro 暴露以下 POSIX 接口，显式声明以保证可移植 */
 extern int ftruncate(int fd, long size);
 extern int fileno(FILE *stream);
+extern int usleep(unsigned int usec);
 
 struct flash_dev {
     flash_config_t cfg;
     FILE          *fp;      /* BIN 文件句柄 */
     uint8_t       *image;   /* 进程内介质镜像，读写先走内存再落盘 */
     uint32_t      *erase_cycles; /* 每块擦写次数数组，长度 = total/erase_size */
+    uint8_t       *bad;     /* 每块坏块标记，1=坏块 */
+    uint32_t      nblocks;
     flash_stats_t stats;
 };
+
+/* 简单可复现伪随机（LCG），避免依赖全局 srand 影响调用方 */
+static uint32_t s_rand_state;
+static void rand_seed(uint32_t s) { s_rand_state = s ? s : 0x9E3779B9u; }
+static uint32_t rand_u32(void) {
+    s_rand_state = s_rand_state * 1664525u + 1013904223u;
+    return s_rand_state;
+}
 
 /* 打开或创建 BIN 文件，并载入内存镜像 */
 static int ensure_file(flash_dev_t *dev)
 {
-    /* 以读写二进制打开；不存在则创建 */
     dev->fp = fopen(dev->cfg.bin_path, "rb+");
     if (!dev->fp) {
         dev->fp = fopen(dev->cfg.bin_path, "wb+");
-        if (!dev->fp) {
-            return -1;
-        }
+        if (!dev->fp) { return -1; }
     }
 
-    /* 若文件大小不足，扩展为 total_size（以 0xFF 填充，模拟空 Flash） */
     fseek(dev->fp, 0, SEEK_END);
     long cur = ftell(dev->fp);
     if (cur < (long)dev->cfg.total_size) {
         uint8_t *zero = (uint8_t *)malloc(dev->cfg.total_size);
         if (!zero) { return -1; }
         memset(zero, 0xFF, dev->cfg.total_size);
-        /* 保留已有内容 */
         if (cur > 0) {
             fseek(dev->fp, 0, SEEK_SET);
             fread(zero, 1, (size_t)cur, dev->fp);
@@ -61,11 +75,9 @@ static int ensure_file(flash_dev_t *dev)
         fflush(dev->fp);
         free(zero);
     } else if (cur > (long)dev->cfg.total_size) {
-        /* 截断到配置大小 */
 #if defined(_WIN32)
         fclose(dev->fp);
         dev->fp = NULL;
-        /* Windows 下用 _chsize_s 通过 freopen 后不便，简单重建 */
         FILE *tf = fopen(dev->cfg.bin_path, "wb+");
         if (!tf) { return -1; }
         uint8_t *buf = (uint8_t *)malloc(dev->cfg.total_size);
@@ -81,6 +93,12 @@ static int ensure_file(flash_dev_t *dev)
 #endif
     }
     return 0;
+}
+
+/* 模拟一次操作耗时（微秒） */
+static void sim_delay(uint32_t us)
+{
+    if (us > 0) { usleep(us); }
 }
 
 flash_dev_t *flash_sim_init(const flash_config_t *cfg)
@@ -103,7 +121,6 @@ flash_dev_t *flash_sim_init(const flash_config_t *cfg)
         return NULL;
     }
 
-    /* 载入内存镜像 */
     dev->image = (uint8_t *)malloc(dev->cfg.total_size);
     if (!dev->image) {
         fclose(dev->fp);
@@ -118,15 +135,29 @@ flash_dev_t *flash_sim_init(const flash_config_t *cfg)
         return NULL;
     }
 
-    /* 擦写次数数组（仅 NOR/NAND） */
-    if (cfg->type != FLASH_TYPE_EEPROM) {
-        uint32_t nblocks = dev->cfg.total_size / dev->cfg.erase_size;
-        dev->erase_cycles = (uint32_t *)calloc(nblocks, sizeof(uint32_t));
-        if (!dev->erase_cycles) {
+    /* 块级数组（仅 NOR/NAND） */
+    if (cfg->type != FLASH_TYPE_EEPROM && cfg->erase_size > 0) {
+        dev->nblocks = dev->cfg.total_size / dev->cfg.erase_size;
+        dev->erase_cycles = (uint32_t *)calloc(dev->nblocks, sizeof(uint32_t));
+        dev->bad = (uint8_t *)calloc(dev->nblocks, sizeof(uint8_t));
+        if (!dev->erase_cycles || !dev->bad) {
             fclose(dev->fp);
             free(dev->image);
+            free(dev->erase_cycles);
+            free(dev->bad);
             free(dev);
             return NULL;
+        }
+        /* 初始化固定坏块（随机选取 bad_blocks 个） */
+        if (dev->cfg.bad_blocks > 0 && dev->nblocks > 0) {
+            rand_seed((uint32_t)time(NULL) ^ 0x1234u);
+            uint32_t placed = 0, guard = 0;
+            while (placed < dev->cfg.bad_blocks && guard < dev->nblocks * 4) {
+                uint32_t idx = rand_u32() % dev->nblocks;
+                if (!dev->bad[idx]) { dev->bad[idx] = 1; placed++; }
+                guard++;
+            }
+            dev->stats.bad_block_count = placed;
         }
     }
 
@@ -136,9 +167,10 @@ flash_dev_t *flash_sim_init(const flash_config_t *cfg)
 void flash_sim_deinit(flash_dev_t *dev)
 {
     if (!dev) { return; }
-    if (dev->fp) { fclose(dev->fp); } /* 镜像已在每次操作后落盘，此处确保关闭 */
+    if (dev->fp) { fclose(dev->fp); }
     if (dev->image) { free(dev->image); }
     if (dev->erase_cycles) { free(dev->erase_cycles); }
+    if (dev->bad) { free(dev->bad); }
     free(dev);
 }
 
@@ -148,8 +180,11 @@ flash_err_t flash_sim_read(const flash_dev_t *dev, uint32_t offset,
     if (!dev || !buf || len == 0) { return FLASH_ERR_ARGS; }
     if (offset + len > dev->cfg.total_size) { return FLASH_ERR_RANGE; }
 
+    sim_delay(dev->cfg.read_us);
     memcpy(buf, dev->image + offset, len);
-    ((flash_dev_t *)dev)->stats.total_reads++;
+    flash_dev_t *d = (flash_dev_t *)dev;
+    d->stats.total_reads++;
+    d->stats.read_time_us += dev->cfg.read_us;
     return FLASH_OK;
 }
 
@@ -165,13 +200,10 @@ flash_err_t flash_sim_write(flash_dev_t *dev, uint32_t offset,
     const uint8_t *src = (const uint8_t *)buf;
 
     if (dev->cfg.type == FLASH_TYPE_EEPROM) {
-        /* 字节级覆盖写，无约束 */
         memcpy(dev->image + offset, src, len);
     } else {
-        /* NOR/NAND：目标位须为 1（0xFF），写入只能把 1->0 */
         for (uint32_t i = 0; i < len; i++) {
             if ((dev->image[offset + i] & src[i]) != src[i]) {
-                /* 试图把已为 0 的位写回 1，违反 NOR 物理特性 */
                 return FLASH_ERR_WRITE;
             }
         }
@@ -180,14 +212,16 @@ flash_err_t flash_sim_write(flash_dev_t *dev, uint32_t offset,
         }
     }
 
-    /* 落盘 */
+    sim_delay(dev->cfg.write_us);
     fseek(dev->fp, (long)offset, SEEK_SET);
     if (fwrite(dev->image + offset, 1, len, dev->fp) != len) {
         return FLASH_ERR_IO;
     }
     fflush(dev->fp);
 
-    dev->stats.total_writes += len;
+    dev->stats.total_writes++;
+    dev->stats.total_write_bytes += len;
+    dev->stats.write_time_us += dev->cfg.write_us;
     return FLASH_OK;
 }
 
@@ -202,20 +236,33 @@ flash_err_t flash_sim_erase(flash_dev_t *dev, uint32_t offset, uint32_t len)
     }
     if (offset + len > dev->cfg.total_size) { return FLASH_ERR_RANGE; }
 
-    uint32_t nblocks = dev->cfg.erase_size ? (dev->cfg.total_size / dev->cfg.erase_size) : 0;
+    uint32_t nblocks = dev->nblocks;
 
     for (uint32_t b = offset; b < offset + len; b += dev->cfg.erase_size) {
         uint32_t blk_idx = b / dev->cfg.erase_size;
-        if (blk_idx < nblocks) {
-            if (dev->erase_cycles[blk_idx] >= dev->cfg.erase_cycles) {
-                /* 寿命耗尽 */
+        if (blk_idx >= nblocks) { continue; }
+
+        /* 固定坏块：擦除直接失败 */
+        if (dev->bad[blk_idx]) {
+            return FLASH_ERR_ERASE;
+        }
+        /* 运行时坏块注入：按 bad_ratio 概率（万分之一精度）标记坏块 */
+        if (dev->cfg.bad_ratio > 0) {
+            if ((rand_u32() % 10000) < dev->cfg.bad_ratio) {
+                dev->bad[blk_idx] = 1;
+                dev->stats.bad_block_count++;
                 return FLASH_ERR_ERASE;
             }
-            dev->erase_cycles[blk_idx]++;
-            if (dev->erase_cycles[blk_idx] > dev->stats.max_erase_cycles) {
-                dev->stats.max_erase_cycles = dev->erase_cycles[blk_idx];
-            }
         }
+        if (dev->erase_cycles[blk_idx] >= dev->cfg.erase_cycles) {
+            return FLASH_ERR_ERASE; /* 寿命耗尽 */
+        }
+        dev->erase_cycles[blk_idx]++;
+        if (dev->erase_cycles[blk_idx] > dev->stats.max_erase_cycles) {
+            dev->stats.max_erase_cycles = dev->erase_cycles[blk_idx];
+        }
+
+        sim_delay(dev->cfg.erase_us);
         memset(dev->image + b, 0xFF, dev->cfg.erase_size);
         fseek(dev->fp, (long)b, SEEK_SET);
         if (fwrite(dev->image + b, 1, dev->cfg.erase_size, dev->fp)
@@ -223,6 +270,7 @@ flash_err_t flash_sim_erase(flash_dev_t *dev, uint32_t offset, uint32_t len)
             return FLASH_ERR_IO;
         }
         dev->stats.total_erases++;
+        dev->stats.erase_time_us += dev->cfg.erase_us;
     }
     fflush(dev->fp);
     return FLASH_OK;
@@ -243,5 +291,32 @@ flash_err_t flash_sim_get_stats(const flash_dev_t *dev, flash_stats_t *stats)
 {
     if (!dev || !stats) { return FLASH_ERR_ARGS; }
     *stats = dev->stats;
+    if (dev->nblocks > 0) {
+        uint64_t sum = 0;
+        uint32_t valid = 0;
+        for (uint32_t i = 0; i < dev->nblocks; i++) {
+            if (!dev->bad[i]) { sum += dev->erase_cycles[i]; valid++; }
+        }
+        stats->avg_erase_cycles = valid ? (uint32_t)(sum / valid) : 0;
+    }
     return FLASH_OK;
+}
+
+uint32_t flash_sim_get_wear_map(const flash_dev_t *dev, uint32_t *out,
+                                uint32_t max_blocks)
+{
+    if (!dev) { return 0; }
+    uint32_t n = dev->nblocks;
+    if (!out) { return n; }
+    uint32_t copy = n < max_blocks ? n : max_blocks;
+    for (uint32_t i = 0; i < copy; i++) {
+        out[i] = dev->erase_cycles[i];
+    }
+    return n;
+}
+
+uint32_t flash_sim_block_count(const flash_dev_t *dev)
+{
+    if (!dev) { return 0; }
+    return dev->nblocks;
 }

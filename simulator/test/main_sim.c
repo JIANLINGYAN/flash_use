@@ -1,18 +1,19 @@
 /**
- * main_sim.c - 模拟基座示例 / 自检程序（第一步完成标准验证）
+ * main_sim.c - 模拟基座示例 / 自检程序
  *
- * 行为：
- *  1. 创建一个 NOR Flash 模拟设备（BIN 文件 nor_demo.bin）
- *  2. 擦除一个块 -> 写入一段数据 -> 读取回来 -> 校验一致
- *  3. 演示"未擦除就写"会被拒绝（符合 NOR 物理特性）
- *  4. 创建一个 EEPROM 模拟设备（BIN 文件 eeprom_demo.bin）
- *  5. 直接字节级写入并读取校验
+ * 支持通过环境变量配置介质参数（前端注入）：
+ *   SIM_TYPE(0=NOR,1=NAND,2=EEPROM) SIM_TOTAL SIM_ERASE SIM_WRITE SIM_RD_US
+ *   SIM_WR_US SIM_ERASE_US SIM_CYCLES SIM_BAD_N SIM_BAD_R
+ * 无环境变量时使用默认 64KB NOR 配置。
  *
- * 运行后可用十六进制工具打开 nor_demo.bin / eeprom_demo.bin 自行检验落盘内容。
+ * 自检通过后输出（供后端解析）：
+ *   STATS_JSON:{...}   性能与磨损统计
+ *   WEARMAP:comma,list 每块擦写次数（仅 NOR/NAND）
  */
 
 #include "flash_sim.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define NOR_BIN      "nor_demo.bin"
@@ -28,21 +29,64 @@ static int check(const char *name, flash_err_t rc, flash_err_t expect)
     return 1;
 }
 
+static long env_long(const char *k, long def)
+{
+    const char *v = getenv(k);
+    if (v && *v) { return atol(v); }
+    return def;
+}
+
+/* 输出统计与磨损图（后端按前缀解析） */
+static void dump_stats(flash_dev_t *dev)
+{
+    flash_stats_t st;
+    flash_sim_get_stats(dev, &st);
+    printf("STATS_JSON:{\"reads\":%u,\"writes\":%u,\"erases\":%u,"
+           "\"write_bytes\":%u,\"max_cycles\":%u,\"avg_cycles\":%u,"
+           "\"read_us\":%llu,\"write_us\":%llu,\"erase_us\":%llu,"
+           "\"bad_blocks\":%u}\n",
+           st.total_reads, st.total_writes, st.total_erases,
+           st.total_write_bytes, st.max_erase_cycles, st.avg_erase_cycles,
+           (unsigned long long)st.read_time_us,
+           (unsigned long long)st.write_time_us,
+           (unsigned long long)st.erase_time_us,
+           st.bad_block_count);
+
+    uint32_t n = flash_sim_block_count(dev);
+    if (n > 0) {
+        uint32_t *map = (uint32_t *)malloc(sizeof(uint32_t) * n);
+        if (map) {
+            flash_sim_get_wear_map(dev, map, n);
+            printf("WEARMAP:");
+            for (uint32_t i = 0; i < n; i++) {
+                printf("%s%u", i ? "," : "", map[i]);
+            }
+            printf("\n");
+            free(map);
+        }
+    }
+}
+
 int main(void)
 {
     int fails = 0;
     printf("=== Flash 模拟基座自检 ===\n");
 
-    /* ---------- NOR Flash 示例 ---------- */
+    /* ---------- NOR Flash 示例（配置可经 env 覆盖） ---------- */
     printf("\n[NOR Flash]\n");
     flash_config_t cfg = {
-        .type = FLASH_TYPE_NOR,
-        .total_size = 64 * 1024,     /* 64KB */
-        .erase_size = 4 * 1024,      /* 4KB/块 */
-        .write_size = 1,             /* 最小写入 1 字节（演示用） */
+        .type = (flash_type_t)env_long("SIM_TYPE", FLASH_TYPE_NOR),
+        .total_size = (uint32_t)env_long("SIM_TOTAL", 64 * 1024),
+        .erase_size = (uint32_t)env_long("SIM_ERASE", 4 * 1024),
+        .write_size = (uint32_t)env_long("SIM_WRITE", 1),
         .read_size = 1,
-        .erase_cycles = 100000,
-        .bin_path = NOR_BIN
+        .erase_cycles = (uint32_t)env_long("SIM_CYCLES", 100000),
+        .bin_path = NOR_BIN,
+        .read_us = (uint32_t)env_long("SIM_RD_US", 0),
+        .write_us = (uint32_t)env_long("SIM_WR_US", 0),
+        .erase_us = (uint32_t)env_long("SIM_ERASE_US", 0),
+        .bad_blocks = (uint32_t)env_long("SIM_BAD_N", 0),
+        .bad_ratio = (uint32_t)env_long("SIM_BAD_R", 0),
     };
     flash_dev_t *nor = flash_sim_init(&cfg);
     if (!nor) { printf("  NOR init failed!\n"); return 1; }
@@ -51,11 +95,8 @@ int main(void)
     for (int i = 0; i < 16; i++) wbuf[i] = (uint8_t)(0xA0 + i);
     uint8_t rbuf[16] = {0};
 
-    /* 擦除块 0 */
     fails += check("erase block 0",
                    flash_sim_erase(nor, 0, cfg.erase_size), FLASH_OK);
-
-    /* 写入并读取校验 */
     fails += check("write after erase",
                    flash_sim_write(nor, 0, wbuf, sizeof(wbuf)), FLASH_OK);
     fails += check("read back",
@@ -64,31 +105,22 @@ int main(void)
                    memcmp(wbuf, rbuf, sizeof(wbuf)) == 0 ? FLASH_OK : FLASH_ERR_IO,
                    FLASH_OK);
 
-    /* 未擦除的覆盖写：已写 0xA0 后试图写 0xFF（需把已为 0 的位翻回 1），
-     * 违反 NOR 只能 1->0 的物理特性，应被拒绝 */
     uint8_t ov[16];
     memset(ov, 0xFF, sizeof(ov));
     fails += check("overwrite without erase (reject)",
                    flash_sim_write(nor, 0, ov, sizeof(ov)),
                    FLASH_ERR_WRITE);
 
-    /* 统计信息 */
-    flash_stats_t st;
-    flash_sim_get_stats(nor, &st);
-    printf("  stats: reads=%u writes=%u erases=%u max_cycles=%u\n",
-           st.total_reads, st.total_writes, st.total_erases, st.max_erase_cycles);
-
-    uint32_t cyc = 0;
-    flash_sim_get_erase_count(nor, 0, &cyc);
-    printf("  block0 erase count = %u\n", cyc);
+    printf("  [info] 性能与磨损统计：\n");
+    dump_stats(nor);
 
     flash_sim_deinit(nor);
 
-    /* ---------- EEPROM 示例 ---------- */
+    /* ---------- EEPROM 示例（固定，演示字节写） ---------- */
     printf("\n[EEPROM]\n");
     flash_config_t ecfg = {
         .type = FLASH_TYPE_EEPROM,
-        .total_size = 2 * 1024,      /* 2KB */
+        .total_size = 2 * 1024,
         .erase_size = 0,
         .write_size = 1,
         .read_size = 1,
@@ -107,7 +139,6 @@ int main(void)
     fails += check("eeprom data match",
                    memcmp(ew, er, sizeof(ew)) == 0 ? FLASH_OK : FLASH_ERR_IO,
                    FLASH_OK);
-    /* EEPROM 不支持 erase */
     fails += check("eeprom erase (reject)",
                    flash_sim_erase(eep, 0, 1), FLASH_ERR_NOTSUP);
 

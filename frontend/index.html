@@ -24,6 +24,7 @@
       <div id="framework-list" class="framework-list">
         <p class="hint">正在加载框架列表…</p>
       </div>
+      <div id="config-area" class="config-area hidden"></div>
       <div class="toolbar">
         <button id="run-btn" class="btn btn-primary" disabled>运行测试</button>
         <button id="refresh-btn" class="btn">刷新框架</button>
@@ -35,7 +36,13 @@
         <div class="stat"><span class="stat-num" id="stat-time">0</span><span class="stat-label">耗时(ms)</span></div>
         <div class="verdict" id="verdict">—</div>
       </div>
+      <div id="perf-stats" class="perf-stats hidden"></div>
       <pre id="output" class="output"><span class="hint">选择框架后点击「运行测试」，结果将在此显示。</span></pre>
+      <div id="wear-wrap" class="wear-wrap hidden">
+        <h3>整片磨损分布（每块擦写次数）</h3>
+        <canvas id="wear-canvas" width="900" height="160"></canvas>
+        <p id="wear-legend" class="hint"></p>
+      </div>
     </section>
 
     <section class="panel">

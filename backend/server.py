@@ -56,25 +56,86 @@ def find_gcc():
 #   includes  编译 -I 包含目录（相对 ROOT）
 #   workdir   测试运行时的工作目录（用于放置 BIN，相对 ROOT）
 # ---------------------------------------------------------------------------
+# 模拟基座可配置项 -> 环境变量名（所有框架共用，注入到测试程序）
+SIM_ENV_MAP = {
+    "type": "SIM_TYPE",
+    "total": "SIM_TOTAL",
+    "erase_size": "SIM_ERASE",
+    "write_size": "SIM_WRITE",
+    "read_us": "SIM_RD_US",
+    "write_us": "SIM_WR_US",
+    "erase_us": "SIM_ERASE_US",
+    "erase_cycles": "SIM_CYCLES",
+    "bad_blocks": "SIM_BAD_N",
+    "bad_ratio": "SIM_BAD_R",
+}
+# KV 测试可配置项 -> 环境变量名
+KV_ENV_MAP = {
+    "capacity": "KV_CAPACITY",
+    "func": "KV_FUNC",
+    "n": "KV_N",
+    "vlen": "KV_VLEN",
+    "rounds": "KV_ROUNDS",
+    "modfreq": "KV_MODFREQ",
+}
+
+# 配置项 schema（前端渲染表单用）：group 区分"模拟基座"与"测试"
+SIM_CONFIG_SCHEMA = [
+    {"key": "type", "label": "存储介质类型", "type": "select",
+     "options": [["0", "NOR"], ["1", "NAND"], ["2", "EEPROM"]], "default": "0",
+     "group": "simulator"},
+    {"key": "total", "label": "总容量(字节)", "type": "number",
+     "default": 65536, "min": 1024, "step": 1024, "group": "simulator"},
+    {"key": "erase_size", "label": "擦除块大小(字节)", "type": "number",
+     "default": 4096, "min": 256, "step": 256, "group": "simulator"},
+    {"key": "write_size", "label": "最小写入单位(字节)", "type": "number",
+     "default": 1, "min": 1, "step": 1, "group": "simulator"},
+    {"key": "erase_cycles", "label": "标称擦写寿命(次)", "type": "number",
+     "default": 100000, "min": 1, "step": 1000, "group": "simulator"},
+    {"key": "read_us", "label": "读耗时(us/次)", "type": "number",
+     "default": 0, "min": 0, "step": 1, "group": "simulator"},
+    {"key": "write_us", "label": "写耗时(us/次)", "type": "number",
+     "default": 0, "min": 0, "step": 1, "group": "simulator"},
+    {"key": "erase_us", "label": "擦除耗时(us/次)", "type": "number",
+     "default": 0, "min": 0, "step": 1, "group": "simulator"},
+    {"key": "bad_blocks", "label": "固定坏块数量", "type": "number",
+     "default": 0, "min": 0, "step": 1, "group": "simulator"},
+    {"key": "bad_ratio", "label": "运行时坏块比率(万分之)", "type": "number",
+     "default": 0, "min": 0, "max": 10000, "step": 1, "group": "simulator"},
+]
+KV_TEST_CONFIG_SCHEMA = [
+    {"key": "func", "label": "功能压测模式", "type": "select",
+     "options": [["0", "一致性自检"], ["1", "功能压测"]], "default": "0",
+     "group": "test"},
+    {"key": "capacity", "label": "KV 区容量(字节)", "type": "number",
+     "default": 8192, "min": 1024, "step": 1024, "group": "test"},
+    {"key": "n", "label": "条目数量", "type": "number",
+     "default": 50, "min": 1, "step": 1, "group": "test"},
+    {"key": "vlen", "label": "每条 value 长度(字节)", "type": "number",
+     "default": 32, "min": 1, "step": 1, "group": "test"},
+    {"key": "rounds", "label": "修改轮数", "type": "number",
+     "default": 20, "min": 1, "step": 1, "group": "test"},
+    {"key": "modfreq", "label": "每轮修改比例(%)", "type": "number",
+     "default": 50, "min": 0, "max": 100, "step": 1, "group": "test"},
+]
+
 FRAMEWORKS = [
     {
         "id": "simulator",
         "name": "模拟基座 (NOR/NAND/EEPROM)",
         "desc": "Flash 物理特性模拟：按块擦除、写入仅允许 1->0、EEPROM 字节写、"
-                "寿命统计。自检覆盖 NOR 写入/读取/掉电拒绝与 EEPROM 读写。",
+                "寿命统计、坏块模拟。可配置类型/容量/块大小/速度/坏点。",
         "sources": ["simulator/flash_sim.c", "simulator/test/main_sim.c"],
         "includes": ["simulator"],
         "workdir": "simulator/test",
-        "params": [
-            {"key": "erase_size", "label": "擦除块大小(字节)", "default": 4096},
-            {"key": "page_size", "label": "最小写入单位(字节)", "default": 1},
-        ],
+        "config_schema": SIM_CONFIG_SCHEMA,
+        "test_schema": [],
     },
     {
         "id": "kv",
         "name": "KV/NVS 存储框架",
         "desc": "基于模拟基座的键值存储：两步提交掉电安全、CRC 校验、后写覆盖、"
-                "删除、压实垃圾回收。验证写入/读取/更新/删除/掉电残留丢弃/GC。",
+                "删除、压实垃圾回收。支持功能压测（条目数/长度/修改频率）。",
         "sources": [
             "simulator/flash_sim.c",
             "frameworks/kv/kv_store.c",
@@ -82,11 +143,8 @@ FRAMEWORKS = [
         ],
         "includes": ["simulator", "frameworks/kv"],
         "workdir": "frameworks/kv/test",
-        "params": [
-            {"key": "capacity", "label": "KV 区容量(字节)", "default": 8192},
-            {"key": "erase_size", "label": "擦除块大小(字节)", "default": 4096},
-            {"key": "page_size", "label": "最小写入单位(字节)", "default": 256},
-        ],
+        "config_schema": SIM_CONFIG_SCHEMA,
+        "test_schema": KV_TEST_CONFIG_SCHEMA,
     },
     # 后续框架（fs / baremetal / ota）在此追加注册即可被前端发现
 ]
@@ -100,12 +158,23 @@ def get_framework(fid):
 
 
 def parse_output(text):
-    """将 C 测试程序 stdout 解析为结构化行，并判定整体成功/失败。"""
+    """将 C 测试程序 stdout 解析为结构化行，并抽取统计与磨损图。"""
     lines = []
     ok_count = 0
     fail_count = 0
+    stats = None
+    wearmap = None
     for raw in text.splitlines():
         line = raw.rstrip("\n")
+        if line.startswith("STATS_JSON:"):
+            try:
+                stats = json.loads(line[len("STATS_JSON:"):])
+            except ValueError:
+                pass
+            continue
+        if line.startswith("WEARMAP:"):
+            wearmap = [int(x) for x in line[len("WEARMAP:"):].split(",") if x != ""]
+            continue
         if "[OK]" in line or "[OK  ]" in line:
             level = "ok"
             ok_count += 1
@@ -119,22 +188,37 @@ def parse_output(text):
         else:
             level = "info"
         lines.append({"level": level, "text": line})
-    # 整体判定：以程序退出码优先；无退出码信息时用"存在失败"字样兜底
     success = fail_count == 0 and ("全部通过" in text or ok_count > 0)
     return {
         "lines": lines,
         "ok_count": ok_count,
         "fail_count": fail_count,
         "success": success,
+        "stats": stats,
+        "wearmap": wearmap,
     }
 
 
-def run_framework(fid):
+def _build_env(config, test_config):
+    """根据前端传入的配置构造测试程序的环境变量（注入 SIM_*/KV_*）。"""
+    env = dict(os.environ)
+    if config:
+        for k, envk in SIM_ENV_MAP.items():
+            if k in config and config[k] != "":
+                env[envk] = str(config[k])
+    if test_config:
+        for k, envk in KV_ENV_MAP.items():
+            if k in test_config and test_config[k] != "":
+                env[envk] = str(test_config[k])
+    return env
+
+
+def run_framework(fid, config=None, test_config=None):
     """编译并运行指定框架测试，返回结果字典。支持内置与已导入框架。"""
     # 已导入的自定义框架
     reg = importer.load_registry()
     if fid in reg:
-        return _run_imported(fid, reg[fid])
+        return _run_imported(fid, reg[fid], config, test_config)
 
     fw = get_framework(fid)
     if not fw:
@@ -169,8 +253,8 @@ def run_framework(fid):
 
     try:
         t0 = time.time()
-        run = subprocess.run([tmp_exe], cwd=workdir,
-                             capture_output=True, text=True, timeout=60)
+        run = subprocess.run([tmp_exe], cwd=workdir, env=_build_env(config, test_config),
+                             capture_output=True, text=True, timeout=120)
         elapsed = time.time() - t0
     except subprocess.TimeoutExpired:
         return {"success": False, "error": "运行超时", "lines": []}
@@ -186,7 +270,7 @@ def run_framework(fid):
     return parsed
 
 
-def _run_imported(fid, manifest):
+def _run_imported(fid, manifest, config=None, test_config=None):
     """编译并运行已导入框架（位于 imports/<id>/）。"""
     gcc = find_gcc()
     if not gcc:
@@ -219,8 +303,8 @@ def _run_imported(fid, manifest):
 
     try:
         t0 = time.time()
-        run = subprocess.run([tmp_exe], cwd=dest,
-                             capture_output=True, text=True, timeout=60)
+        run = subprocess.run([tmp_exe], cwd=dest, env=_build_env(config, test_config),
+                             capture_output=True, text=True, timeout=120)
         elapsed = time.time() - t0
     except subprocess.TimeoutExpired:
         return {"success": False, "error": "运行超时", "lines": []}
@@ -291,7 +375,8 @@ class Handler(BaseHTTPRequestHandler):
         elif route == "/api/frameworks":
             builtin = [
                 {"id": f["id"], "name": f["name"], "desc": f["desc"],
-                 "params": f.get("params", [])}
+                 "config_schema": f.get("config_schema", []),
+                 "test_schema": f.get("test_schema", [])}
                 for f in FRAMEWORKS
             ]
             imported = importer.imported_frameworks()
@@ -310,7 +395,9 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/run":
             fid = payload.get("framework", "")
-            result = run_framework(fid)
+            config = payload.get("config", {})
+            test_config = payload.get("test_config", {})
+            result = run_framework(fid, config, test_config)
             self._send_json(result)
         elif parsed.path == "/api/generate":
             fid = payload.get("framework", "")

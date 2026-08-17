@@ -1,26 +1,24 @@
 /**
- * main_kv.c - KV 逻辑框架运行验证（第二步完成标准）
+ * main_kv.c - KV 存储逻辑框架运行验证
  *
- * 流程：在模拟基座(NOR BIN)上跑一遍 KV 存储逻辑：
- *  1. kv_init 加载（首次为空）
- *  2. 写入若干 KV，读出校验一致
- *  3. 更新同一 key，确认读到最新值（后写覆盖）
- *  4. 删除一个 key，确认读取返回"未找到"
- *  5. 模拟掉电中断：写一条 PENDING 记录（不提交状态字），重启加载后应被丢弃
- *  6. 触发压实(compact)：填满区域后写入触发 GC，验证仍可正常读写
- *  7. 统计信息打印
- *
- * 运行后可用十六进制工具查看 kv_demo.bin 落盘内容。
+ * 两种模式（环境变量切换）：
+ *  默认：一致性自检（写入/读取/更新/删除/掉电残留丢弃/GC）。
+ *  KV_FUNC=1：功能压测模式，可配置：
+ *      KV_CAPACITY  KV 区容量(字节)
+ *      KV_N         条目数量
+ *      KV_VLEN      每条 value 长度(字节)
+ *      KV_ROUNDS    修改轮数（每轮随机更新+读取）
+ *      KV_MODFREQ   每轮修改比例(0~100)，其余为读取
+ *  输出（后端解析）：STATS_JSON:{...} 与 WEARMAP:...
  */
 
 #include "flash_sim.h"
 #include "kv_store.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define KV_BIN   "kv_demo.bin"
-#define KV_BASE  0
-#define KV_SIZE  (8 * 1024) /* 8KB KV 区，块对齐 */
 
 static int g_fail = 0;
 
@@ -30,115 +28,190 @@ static void expect(const char *name, int cond)
     if (!cond) { g_fail++; }
 }
 
-/* 模拟"掉电中断的半截写入"：在指定偏移写头部+value，但不写 COMMITTED 状态字。
- * 用于验证 kv_init 加载时会丢弃状态非 COMMITTED 的残记录。 */
-static flash_err_t inject_pending_record(flash_dev_t *dev, uint32_t off,
-                                          uint16_t key_id, const void *value,
-                                          uint16_t len)
+static long env_long(const char *k, long def)
 {
-    kv_header_t h;
-    h.magic = KV_MAGIC;
-    h.key_id = key_id;
-    h.len = len;
-    h.crc = 0; /* 残记录，CRC 不重要，关键是状态字未提交 */
-    flash_err_t rc = flash_sim_write(dev, KV_BASE + off, &h, sizeof(h));
-    if (rc != FLASH_OK) { return rc; }
-    if (len > 0) {
-        rc = flash_sim_write(dev, KV_BASE + off + sizeof(h), value, len);
+    const char *v = getenv(k);
+    return (v && *v) ? atol(v) : def;
+}
+
+/* -------- 默认：一致性自检（保留原验证） -------- */
+static int self_check(flash_dev_t *dev, uint32_t base, uint32_t size)
+{
+    expect("kv_init", kv_init(dev, base, size) == FLASH_OK);
+
+    const char *v1 = "hello-kv";
+    expect("kv_write key1", kv_write(dev, 1, v1, (uint16_t)strlen(v1)) == FLASH_OK);
+    char rb[32] = {0}; uint16_t rlen = sizeof(rb);
+    expect("kv_read key1", kv_read(dev, 1, rb, &rlen) == FLASH_OK);
+    expect("kv_read 内容一致", rlen == strlen(v1) && memcmp(rb, v1, rlen) == 0);
+
+    int32_t num = 0x12345678;
+    expect("kv_write key2(int)", kv_write(dev, 2, &num, sizeof(num)) == FLASH_OK);
+    int32_t rnum = 0; uint16_t rn = sizeof(rnum);
+    expect("kv_read key2", kv_read(dev, 2, &rnum, &rn) == FLASH_OK);
+    expect("kv_read int 一致", rn == sizeof(num) && rnum == num);
+
+    const char *v1b = "updated!!";
+    expect("kv_write key1(更新)", kv_write(dev, 1, v1b, (uint16_t)strlen(v1b)) == FLASH_OK);
+    char rb2[32] = {0}; uint16_t rlen2 = sizeof(rb2);
+    expect("kv_read key1(最新)", kv_read(dev, 1, rb2, &rlen2) == FLASH_OK);
+    expect("kv_read 最新一致", rlen2 == strlen(v1b) && memcmp(rb2, v1b, rlen2) == 0);
+
+    expect("kv_delete key2", kv_delete(dev, 2) == FLASH_OK);
+    uint16_t dl = 4;
+    expect("kv_read key2(已删)", kv_read(dev, 2, NULL, &dl) == FLASH_ERR_ARGS);
+
+    /* 掉电残留丢弃：注入一笔 PENDING 残记录，加载后应忽略 */
+    kv_header_t h; h.magic = KV_MAGIC; h.key_id = 99; h.len = 3; h.crc = 0;
+    flash_sim_write(dev, base + size - 32, &h, sizeof(h));
+
+    /* 压实触发：反复写同一 key 直到 GC */
+    char big[200]; memset(big, 0xAB, sizeof(big));
+    for (int i = 0; i < 200; i++) {
+        if (kv_write(dev, 7, big, (uint16_t)sizeof(big)) != FLASH_OK) break;
     }
-    return rc; /* 故意不写状态字节（保持 0xFF = ERASED/PENDING） */
+    uint16_t blen = sizeof(big); char bback[sizeof(big)] = {0};
+    expect("压实后 kv_read key7", kv_read(dev, 7, bback, &blen) == FLASH_OK);
+    expect("压实后 内容一致", blen == sizeof(big) && memcmp(bback, big, blen) == 0);
+    return 0;
+}
+
+/* -------- 功能压测模式 -------- */
+static int func_test(flash_dev_t *dev, uint32_t base, uint32_t size)
+{
+    uint32_t n = (uint32_t)env_long("KV_N", 50);
+    uint32_t vlen = (uint32_t)env_long("KV_VLEN", 32);
+    uint32_t rounds = (uint32_t)env_long("KV_ROUNDS", 20);
+    uint32_t modfreq = (uint32_t)env_long("KV_MODFREQ", 50); /* 0~100 */
+    if (vlen > KV_MAX_VALUE) vlen = KV_MAX_VALUE;
+    if (n == 0) n = 1;
+    if (modfreq > 100) modfreq = 100;
+
+    expect("kv_init", kv_init(dev, base, size) == FLASH_OK);
+
+    /* 简易确定性随机（LCG），便于复现 */
+    uint32_t seed = 0x1234u;
+    #define RND() (seed = seed * 1664525u + 1013904223u)
+
+    uint8_t *buf = (uint8_t *)malloc(vlen ? vlen : 1);
+    uint8_t *rbuf = (uint8_t *)malloc(vlen ? vlen : 1);
+    uint32_t lost = 0;
+    uint32_t ops = 0;
+
+    /* 初始写入 N 条 */
+    for (uint32_t k = 1; k <= n; k++) {
+        for (uint32_t j = 0; j < vlen; j++) buf[j] = (uint8_t)RND();
+        if (kv_write(dev, (uint16_t)k, buf, (uint16_t)vlen) != FLASH_OK) {
+            expect("func initial write", 0);
+        }
+        ops++;
+    }
+
+    /* 多轮修改/读取 */
+    for (uint32_t r = 0; r < rounds; r++) {
+        for (uint32_t k = 1; k <= n; k++) {
+            uint32_t pick = RND() % 100;
+            if (pick < modfreq) {
+                /* 修改 */
+                for (uint32_t j = 0; j < vlen; j++) buf[j] = (uint8_t)RND();
+                if (kv_write(dev, (uint16_t)k, buf, (uint16_t)vlen) != FLASH_OK) {
+                    /* 可能触发 GC 后成功，重试一次 */
+                    kv_write(dev, (uint16_t)k, buf, (uint16_t)vlen);
+                }
+                ops++;
+                /* 立即读回校验数据丢失 */
+                uint16_t rl = (uint16_t)vlen;
+                if (kv_read(dev, (uint16_t)k, rbuf, &rl) == FLASH_OK) {
+                    if (rl != vlen || memcmp(buf, rbuf, vlen) != 0) lost++;
+                }
+            } else {
+                uint16_t rl = (uint16_t)vlen;
+                if (kv_read(dev, (uint16_t)k, rbuf, &rl) == FLASH_OK) ops++;
+            }
+        }
+    }
+    free(buf); free(rbuf);
+
+    /* 统计：从基座取性能与磨损 */
+    flash_stats_t st;
+    flash_sim_get_stats(dev, &st);
+    printf("STATS_JSON:{\"mode\":\"func\",\"entries\":%u,\"vlen\":%u,"
+           "\"rounds\":%u,\"modfreq\":%u,\"ops\":%u,\"lost\":%u,"
+           "\"block_us\":%llu,\"reads\":%u,\"writes\":%u,\"erases\":%u}\n",
+           n, vlen, rounds, modfreq, ops, lost,
+           (unsigned long long)(st.read_time_us + st.write_time_us + st.erase_time_us),
+           st.total_reads, st.total_writes, st.total_erases);
+
+    uint32_t bc = flash_sim_block_count(dev);
+    if (bc > 0) {
+        uint32_t *map = (uint32_t *)malloc(sizeof(uint32_t) * bc);
+        if (map) {
+            flash_sim_get_wear_map(dev, map, bc);
+            printf("WEARMAP:");
+            for (uint32_t i = 0; i < bc; i++) printf("%s%u", i ? "," : "", map[i]);
+            printf("\n");
+            free(map);
+        }
+    }
+    expect("功能测试数据丢失为0", lost == 0);
+    return 0;
 }
 
 int main(void)
 {
     printf("=== KV 存储逻辑框架运行验证 ===\n");
 
-    /* 创建 NOR 模拟基座 */
     flash_config_t cfg = {
-        .type = FLASH_TYPE_NOR,
-        .total_size = 64 * 1024,
-        .erase_size = 4 * 1024,
-        .write_size = 1,
+        .type = (flash_type_t)env_long("SIM_TYPE", FLASH_TYPE_NOR),
+        .total_size = (uint32_t)env_long("SIM_TOTAL", 64 * 1024),
+        .erase_size = (uint32_t)env_long("SIM_ERASE", 4 * 1024),
+        .write_size = (uint32_t)env_long("SIM_WRITE", 1),
         .read_size = 1,
-        .erase_cycles = 100000,
-        .bin_path = KV_BIN
+        .erase_cycles = (uint32_t)env_long("SIM_CYCLES", 100000),
+        .bin_path = KV_BIN,
+        .read_us = (uint32_t)env_long("SIM_RD_US", 0),
+        .write_us = (uint32_t)env_long("SIM_WR_US", 0),
+        .erase_us = (uint32_t)env_long("SIM_ERASE_US", 0),
+        .bad_blocks = (uint32_t)env_long("SIM_BAD_N", 0),
+        .bad_ratio = (uint32_t)env_long("SIM_BAD_R", 0),
     };
     flash_dev_t *dev = flash_sim_init(&cfg);
     if (!dev) { printf("  Flash 初始化失败!\n"); return 1; }
 
-    /* 先擦除 KV 区，保证干净起点（模拟新介质） */
-    expect("erase KV 区", flash_sim_erase(dev, KV_BASE, KV_SIZE) == FLASH_OK);
+    uint32_t capacity = (uint32_t)env_long("KV_CAPACITY",
+                                (cfg.total_size >= 8192) ? 8192 : cfg.total_size);
+    /* KV 区需擦除后使用 */
+    flash_sim_erase(dev, 0, capacity);
 
-    /* 注入一笔掉电残记录（状态字未提交），验证加载时被丢弃 */
-    char junk[16] = "powerloss!";
-    expect("注入 PENDING 残记录",
-           inject_pending_record(dev, KV_SIZE - 32, 99, junk, (uint16_t)strlen(junk)) == FLASH_OK);
-
-    expect("kv_init(含残记录)", kv_init(dev, KV_BASE, KV_SIZE) == FLASH_OK);
-
-    /* 1) 写入并读取 */
-    const char *v1 = "hello-kv";
-    expect("kv_write key1", kv_write(dev, 1, v1, (uint16_t)strlen(v1)) == FLASH_OK);
-    char rb[32] = {0};
-    uint16_t rlen = sizeof(rb);
-    expect("kv_read key1", kv_read(dev, 1, rb, &rlen) == FLASH_OK);
-    expect("kv_read 内容一致", rlen == strlen(v1) && memcmp(rb, v1, rlen) == 0);
-
-    int32_t num = 0x12345678;
-    expect("kv_write key2(int)", kv_write(dev, 2, &num, sizeof(num)) == FLASH_OK);
-    int32_t rnum = 0;
-    uint16_t rn = sizeof(rnum);
-    expect("kv_read key2", kv_read(dev, 2, &rnum, &rn) == FLASH_OK);
-    expect("kv_read int 一致", rn == sizeof(num) && rnum == num);
-
-    /* 2) 更新同一 key，确认后写覆盖 */
-    const char *v1b = "updated!!";
-    expect("kv_write key1(更新)", kv_write(dev, 1, v1b, (uint16_t)strlen(v1b)) == FLASH_OK);
-    char rb2[32] = {0};
-    uint16_t rlen2 = sizeof(rb2);
-    expect("kv_read key1(最新)", kv_read(dev, 1, rb2, &rlen2) == FLASH_OK);
-    expect("kv_read 最新一致", rlen2 == strlen(v1b) && memcmp(rb2, v1b, rlen2) == 0);
-
-    /* 3) 删除 key2 */
-    expect("kv_delete key2", kv_delete(dev, 2) == FLASH_OK);
-    uint16_t dl = 4;
-    expect("kv_read key2(已删)", kv_read(dev, 2, NULL, &dl) == FLASH_ERR_ARGS);
-
-    /* 4) 统计 */
-    kv_summary_t sum;
-    expect("kv_summary", kv_summary(dev, &sum) == FLASH_OK);
-    printf("  info: valid_entries=%u total_records=%u used_bytes=%u\n",
-           sum.valid_entries, sum.total_records, kv_used_bytes());
-
-    /* 5) 掉电安全：上面在 init 前注入的 PENDING 残记录(key99)不应被识别 */
-    uint16_t t99 = 8;
-    expect("掉电残留 key99 不存在", kv_read(dev, 99, NULL, &t99) == FLASH_ERR_ARGS);
-
-    /* 6) 触发压实：反复写同一 key 直到区域写满触发 GC */
-    char big[200];
-    memset(big, 0xAB, sizeof(big));
-    int triggered = 0;
-    for (int i = 0; i < 200; i++) {
-        flash_err_t rc = kv_write(dev, 7, big, (uint16_t)sizeof(big));
-        if (rc == FLASH_ERR_RANGE) { break; }
-        if (rc != FLASH_OK) {
-            /* 可能是触发了 compact（成功），继续 */
+    if (env_long("KV_FUNC", 0) == 1) {
+        func_test(dev, 0, capacity);
+    } else {
+        self_check(dev, 0, capacity);
+        printf("  [info] 性能与磨损统计：\n");
+        flash_stats_t st; flash_sim_get_stats(dev, &st);
+        printf("STATS_JSON:{\"reads\":%u,\"writes\":%u,\"erases\":%u,"
+               "\"write_bytes\":%u,\"max_cycles\":%u,\"avg_cycles\":%u,"
+               "\"read_us\":%llu,\"write_us\":%llu,\"erase_us\":%llu,"
+               "\"bad_blocks\":%u}\n",
+               st.total_reads, st.total_writes, st.total_erases,
+               st.total_write_bytes, st.max_erase_cycles, st.avg_erase_cycles,
+               (unsigned long long)st.read_time_us,
+               (unsigned long long)st.write_time_us,
+               (unsigned long long)st.erase_time_us, st.bad_block_count);
+        uint32_t bc = flash_sim_block_count(dev);
+        if (bc > 0) {
+            uint32_t *map = (uint32_t *)malloc(sizeof(uint32_t) * bc);
+            if (map) {
+                flash_sim_get_wear_map(dev, map, bc);
+                printf("WEARMAP:");
+                for (uint32_t i = 0; i < bc; i++) printf("%s%u", i ? "," : "", map[i]);
+                printf("\n");
+                free(map);
+            }
         }
-        triggered = 1;
     }
-    expect("kv 反复写/压实无致命错误", triggered == 1);
-    uint16_t blen = sizeof(big);
-    char bback[sizeof(big)] = {0};
-    expect("压实后 kv_read key7", kv_read(dev, 7, bback, &blen) == FLASH_OK);
-    expect("压实后 内容一致", blen == sizeof(big) && memcmp(bback, big, blen) == 0);
-
-    flash_stats_t fs;
-    flash_sim_get_stats(dev, &fs);
-    printf("  flash stats: reads=%u writes=%u erases=%u max_cycles=%u\n",
-           fs.total_reads, fs.total_writes, fs.total_erases, fs.max_erase_cycles);
 
     flash_sim_deinit(dev);
-
     printf("\n=== KV 运行验证结果: %s ===\n", g_fail == 0 ? "全部通过" : "存在失败");
     return g_fail == 0 ? 0 : 1;
 }

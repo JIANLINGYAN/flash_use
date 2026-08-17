@@ -52,6 +52,13 @@ typedef struct {
     uint32_t read_size;       /* 最小读取单位（字节），通常 1 */
     uint32_t erase_cycles;    /* 标称擦写寿命（次），如 100000 */
     const char *bin_path;     /* BIN 文件路径（模拟物理介质） */
+
+    /* ---- 性能与异常模拟（可配置，模拟真实 Flash 指标） ---- */
+    uint32_t read_us;         /* 读操作耗时（微秒/次），0 表示不模拟延时 */
+    uint32_t write_us;        /* 写操作耗时（微秒/次），0 表示不模拟延时 */
+    uint32_t erase_us;        /* 擦除操作耗时（微秒/次），0 表示不模拟延时 */
+    uint32_t bad_blocks;      /* 固定坏块数量（初始化时随机标记为坏块） */
+    uint32_t bad_ratio;       /* 运行时坏块比率(0~10000，万分之一精度)，擦除时按概率注入坏块 */
 } flash_config_t;
 
 /**
@@ -90,7 +97,7 @@ flash_err_t flash_sim_write(flash_dev_t *dev, uint32_t offset,
  */
 flash_err_t flash_sim_erase(flash_dev_t *dev, uint32_t offset, uint32_t len);
 
-/* ============ 可选：异常模拟与统计接口（第一阶段先提供基础版） ============ */
+/* ============ 异常模拟与统计接口 ============ */
 
 /**
  * 查询某地址所在块的已擦写次数（用于磨损均衡/寿命监控）。
@@ -101,16 +108,36 @@ flash_err_t flash_sim_get_erase_count(const flash_dev_t *dev, uint32_t offset,
                                       uint32_t *cycles);
 
 /**
- * 获取统计信息。
+ * 获取统计信息（含性能耗时与磨损概况）。
  */
 typedef struct {
     uint32_t total_reads;     /* 累计读操作次数 */
-    uint32_t total_writes;    /* 累计写字节数 */
+    uint32_t total_writes;    /* 累计写操作次数 */
     uint32_t total_erases;    /* 累计擦除块数 */
+    uint32_t total_write_bytes;/* 累计写入字节数 */
     uint32_t max_erase_cycles;/* 全片最高擦写次数 */
+    uint32_t avg_erase_cycles;/* 全片平均擦写次数（有效块） */
+    uint64_t read_time_us;    /* 累计读耗时（微秒） */
+    uint64_t write_time_us;   /* 累计写耗时（微秒） */
+    uint64_t erase_time_us;   /* 累计擦除耗时（微秒） */
+    uint32_t bad_block_count; /* 当前已知坏块数量 */
 } flash_stats_t;
 
 flash_err_t flash_sim_get_stats(const flash_dev_t *dev, flash_stats_t *stats);
+
+/**
+ * 获取整片磨损分布（每块擦写次数），用于绘图。
+ * @param out       输出数组（长度需 >= 块数）
+ * @param max_blocks 数组容量（块数）；返回实际块数
+ * @return          实际块数；若 out 为 NULL 仅返回块数
+ */
+uint32_t flash_sim_get_wear_map(const flash_dev_t *dev, uint32_t *out,
+                                uint32_t max_blocks);
+
+/**
+ * 返回介质总块数（total_size / erase_size）。
+ */
+uint32_t flash_sim_block_count(const flash_dev_t *dev);
 
 #ifdef __cplusplus
 }
