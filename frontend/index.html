@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Flash 存储仿真平台 - 模拟运行</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">⚡</span>
+      <div>
+        <h1>Flash 存储仿真平台</h1>
+        <p class="subtitle">模拟基座 · 存储框架 · 仿真验证</p>
+      </div>
+    </div>
+    <div id="status-pill" class="pill pill-idle">就绪</div>
+  </header>
+
+  <main class="container">
+    <section class="panel">
+      <h2>① 选择测试框架</h2>
+      <div id="framework-list" class="framework-list">
+        <p class="hint">正在加载框架列表…</p>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>② 运行与结果</h2>
+      <div class="toolbar">
+        <button id="run-btn" class="btn btn-primary" disabled>运行测试</button>
+        <button id="refresh-btn" class="btn">刷新框架</button>
+        <span id="meta" class="meta"></span>
+      </div>
+
+      <div id="result-summary" class="summary hidden">
+        <div class="stat"><span class="stat-num" id="stat-ok">0</span><span class="stat-label">通过</span></div>
+        <div class="stat"><span class="stat-num fail" id="stat-fail">0</span><span class="stat-label">失败</span></div>
+        <div class="stat"><span class="stat-num" id="stat-time">0</span><span class="stat-label">耗时(ms)</span></div>
+        <div class="verdict" id="verdict">—</div>
+      </div>
+
+      <pre id="output" class="output"><span class="hint">选择框架后点击「运行测试」，结果将在此显示。</span></pre>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span>前端 → 后端 API → 模拟基座(C) → BIN 物理介质</span>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

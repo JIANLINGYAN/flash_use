@@ -1,4 +1,12 @@
-# 模拟基座生成的物理介质镜像与编译产物
+# 编译产物与测试可执行文件
 *.bin
 flash_sim_test
 kv_test
+/tmp/flash_use_*_test
+
+# Python
+__pycache__/
+*.pyc
+
+# 编辑器/系统
+.DS_Store
