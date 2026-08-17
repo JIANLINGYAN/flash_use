@@ -203,6 +203,19 @@ flash_err_t flash_sim_write(flash_dev_t *dev, uint32_t offset,
         memcpy(dev->image + offset, src, len);
     } else {
         /*
+         * NOR/NAND 编程语义：写入是"按位与"（浮栅只能由 1 编程为 0）。
+         * NAND 额外要求：坏块（出厂/运行时）不可写，写入前须检查块状态。
+         */
+        if (dev->nblocks > 0) {
+            uint32_t first = offset / dev->cfg.erase_size;
+            uint32_t last = (offset + len - 1) / dev->cfg.erase_size;
+            for (uint32_t b = first; b <= last; b++) {
+                if (b < dev->nblocks && dev->bad[b]) {
+                    return FLASH_ERR_WRITE; /* 坏块拒绝写入 */
+                }
+            }
+        }
+        /*
          * NOR/NAND 编程语义：写入是"按位与"（浮栅只能由 1 编程为 0），
          * 因此源数据中为 1 的位表示"保持该位当前状态"，不构成非法写入；
          * 只有当源数据某位为 0 而目标已为 0 时也是允许的（重复编程为 0）。

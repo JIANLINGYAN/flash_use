@@ -78,23 +78,27 @@ KV_ENV_MAP = {
 }
 
 # 配置项 schema（前端渲染表单用）：group 区分"模拟基座"与"测试"
+# 注意：容量/擦除块/寿命/耗时等字段 default=0 表示"不显式覆盖"，
+# 由模拟基座按介质类型套用硬件特性表默认物理指标
+# （见 flash_sim.h FLASH_CFG_DEFAULTS_BY_TYPE）。这样 NOR/NAND/EEPROM
+# 在未配置时各自获得正确的默认容量、擦除代价与寿命。
 SIM_CONFIG_SCHEMA = [
     {"key": "type", "label": "存储介质类型", "type": "select",
      "options": [["0", "NOR"], ["1", "NAND"], ["2", "EEPROM"]], "default": "0",
      "group": "simulator"},
-    {"key": "total", "label": "总容量(字节)", "type": "number",
-     "default": 65536, "min": 1024, "step": 1024, "group": "simulator"},
-    {"key": "erase_size", "label": "擦除块大小(字节)", "type": "number",
-     "default": 4096, "min": 256, "step": 256, "group": "simulator"},
+    {"key": "total", "label": "总容量(字节,0=按类型默认)", "type": "number",
+     "default": 0, "min": 0, "step": 1024, "group": "simulator"},
+    {"key": "erase_size", "label": "擦除块大小(字节,0=按类型默认)", "type": "number",
+     "default": 0, "min": 0, "step": 256, "group": "simulator"},
     {"key": "write_size", "label": "最小写入单位(字节)", "type": "number",
      "default": 1, "min": 1, "step": 1, "group": "simulator"},
-    {"key": "erase_cycles", "label": "标称擦写寿命(次)", "type": "number",
-     "default": 100000, "min": 1, "step": 1000, "group": "simulator"},
-    {"key": "read_us", "label": "读耗时(us/次)", "type": "number",
+    {"key": "erase_cycles", "label": "标称擦写寿命(次,0=按类型默认)", "type": "number",
+     "default": 0, "min": 0, "step": 1000, "group": "simulator"},
+    {"key": "read_us", "label": "读耗时(us/次,0=按类型默认)", "type": "number",
      "default": 0, "min": 0, "step": 1, "group": "simulator"},
-    {"key": "write_us", "label": "写耗时(us/次)", "type": "number",
+    {"key": "write_us", "label": "写耗时(us/次,0=按类型默认)", "type": "number",
      "default": 0, "min": 0, "step": 1, "group": "simulator"},
-    {"key": "erase_us", "label": "擦除耗时(us/次)", "type": "number",
+    {"key": "erase_us", "label": "擦除耗时(us/次,0=按类型默认)", "type": "number",
      "default": 0, "min": 0, "step": 1, "group": "simulator"},
     {"key": "bad_blocks", "label": "固定坏块数量", "type": "number",
      "default": 0, "min": 0, "step": 1, "group": "simulator"},

@@ -26,6 +26,88 @@ typedef enum {
     FLASH_TYPE_EEPROM  = 2  /* 字节级读写、超长寿命 */
 } flash_type_t;
 
+/*
+ * 三类介质的默认物理指标（依据嵌入式 Flash 硬件特性表）。
+ * 这些默认值供模拟基座与各存储框架初始化时引用，使"未显式配置"
+ * 的场景也能体现真实硬件的读写粒度、擦除代价与寿命差异。
+ *
+ * 取值来源（典型值）：
+ *  - NOR  : 读字节级(XIP) / 写页(256B) / 擦除扇区4KB / 扇区擦除几十ms /
+ *           页编程几十~几百us / 寿命 10K~100K 次/扇区。
+ *  - NAND : 读按页 / 写按页(2KB) / 擦除块(由多页组成) / 块擦除 1~数ms /
+ *           页编程 200~800us / 寿命 SLC 10K~100K 次/块 / 存在坏块需 ECC。
+ *  - EEPROM: 字节级读写 / 单字节原地改写、无需擦除 / 单字节写几百us /
+ *           寿命 100K~1M 次/字节。
+ */
+#define FLASH_NOR_TOTAL        (64ul * 1024)   /* 默认容量 64KB（主流 SPI-NOR） */
+#define FLASH_NOR_ERASE        4096u           /* 扇区擦除粒度 4KB */
+#define FLASH_NOR_WRITE        1u              /* 模拟层按字节编程（硬件页=256B，但不强制整页） */
+#define FLASH_NOR_READ         1u              /* 任意字节随机读 */
+#define FLASH_NOR_CYCLES       100000u         /* 擦写寿命 10万次/扇区 */
+#define FLASH_NOR_READ_US      50u             /* 字节读 ~50us（优秀，XIP） */
+#define FLASH_NOR_WRITE_US     200u            /* 页编程 ~200us（按页计量，字节写按比例近似） */
+#define FLASH_NOR_ERASE_US     40000u          /* 扇区擦除 ~40ms */
+
+#define FLASH_NAND_TOTAL       (128ul * 1024 * 1024) /* 默认容量 128MB */
+#define FLASH_NAND_ERASE       (128u * 1024)  /* 块擦除粒度 128KB（多页组成） */
+#define FLASH_NAND_WRITE       1u              /* 模拟层按字节编程（硬件按页 2KB；模拟支持字节访问便于框架复用） */
+#define FLASH_NAND_READ        1u              /* 模拟层按字节读（硬件按页） */
+#define FLASH_NAND_CYCLES      100000u         /* SLC 擦写寿命 10万次/块 */
+#define FLASH_NAND_READ_US     100u            /* 页读 ~100us */
+#define FLASH_NAND_WRITE_US    500u            /* 页编程 ~500us（200~800us） */
+#define FLASH_NAND_ERASE_US    3000u           /* 块擦除 ~3ms（1~数ms） */
+
+#define FLASH_EEPROM_TOTAL     (32u * 1024)   /* 默认容量 32KB（外部 24Cxx 级） */
+#define FLASH_EEPROM_ERASE     0u              /* 无擦除块概念 */
+#define FLASH_EEPROM_WRITE     1u              /* 单字节可写 */
+#define FLASH_EEPROM_READ      1u              /* 字节级随机读 */
+#define FLASH_EEPROM_CYCLES    1000000u        /* 寿命 100万次/字节 */
+#define FLASH_EEPROM_READ_US   50u             /* 字节读 ~50us */
+#define FLASH_EEPROM_WRITE_US  500u            /* 单字节写 ~500us */
+#define FLASH_EEPROM_ERASE_US  0u              /* 无擦除 */
+
+/*
+ * 根据介质类型填充未显式配置的默认值。
+ * 调用方先置零 cfg，再调用本宏填充类型相关默认项；
+ * 再覆盖需要显式指定的字段（如 bin_path / bad_blocks 等）。
+ */
+#define FLASH_CFG_DEFAULTS_BY_TYPE(cfg, type) \
+    do { \
+        switch (type) { \
+        case FLASH_TYPE_NAND: \
+            (cfg).total_size = (cfg).total_size ? (cfg).total_size : FLASH_NAND_TOTAL; \
+            (cfg).erase_size = (cfg).erase_size ? (cfg).erase_size : FLASH_NAND_ERASE; \
+            (cfg).write_size = (cfg).write_size ? (cfg).write_size : FLASH_NAND_WRITE; \
+            (cfg).read_size  = (cfg).read_size  ? (cfg).read_size  : FLASH_NAND_READ;  \
+            (cfg).erase_cycles = (cfg).erase_cycles ? (cfg).erase_cycles : FLASH_NAND_CYCLES; \
+            (cfg).read_us  = (cfg).read_us  ? (cfg).read_us  : FLASH_NAND_READ_US;  \
+            (cfg).write_us = (cfg).write_us ? (cfg).write_us : FLASH_NAND_WRITE_US; \
+            (cfg).erase_us = (cfg).erase_us ? (cfg).erase_us : FLASH_NAND_ERASE_US; \
+            break; \
+        case FLASH_TYPE_EEPROM: \
+            (cfg).total_size = (cfg).total_size ? (cfg).total_size : FLASH_EEPROM_TOTAL; \
+            (cfg).erase_size = 0; \
+            (cfg).write_size = (cfg).write_size ? (cfg).write_size : FLASH_EEPROM_WRITE; \
+            (cfg).read_size  = (cfg).read_size  ? (cfg).read_size  : FLASH_EEPROM_READ;  \
+            (cfg).erase_cycles = (cfg).erase_cycles ? (cfg).erase_cycles : FLASH_EEPROM_CYCLES; \
+            (cfg).read_us  = (cfg).read_us  ? (cfg).read_us  : FLASH_EEPROM_READ_US;  \
+            (cfg).write_us = (cfg).write_us ? (cfg).write_us : FLASH_EEPROM_WRITE_US; \
+            (cfg).erase_us = 0; \
+            break; \
+        case FLASH_TYPE_NOR: \
+        default: \
+            (cfg).total_size = (cfg).total_size ? (cfg).total_size : FLASH_NOR_TOTAL; \
+            (cfg).erase_size = (cfg).erase_size ? (cfg).erase_size : FLASH_NOR_ERASE; \
+            (cfg).write_size = (cfg).write_size ? (cfg).write_size : FLASH_NOR_WRITE; \
+            (cfg).read_size  = (cfg).read_size  ? (cfg).read_size  : FLASH_NOR_READ;  \
+            (cfg).erase_cycles = (cfg).erase_cycles ? (cfg).erase_cycles : FLASH_NOR_CYCLES; \
+            (cfg).read_us  = (cfg).read_us  ? (cfg).read_us  : FLASH_NOR_READ_US;  \
+            (cfg).write_us = (cfg).write_us ? (cfg).write_us : FLASH_NOR_WRITE_US; \
+            (cfg).erase_us = (cfg).erase_us ? (cfg).erase_us : FLASH_NOR_ERASE_US; \
+            break; \
+        } \
+    } while (0)
+
 /* 通用错误码（与多数嵌入式 Flash 驱动约定一致，0 表示成功） */
 typedef enum {
     FLASH_OK          = 0,
