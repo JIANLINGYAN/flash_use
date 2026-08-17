@@ -463,6 +463,8 @@ def _classify_line(line):
         return "ok"
     if "[FAIL]" in s or "[ERROR]" in s or "FAIL" in s.upper():
         return "fail"
+    if "[WARN]" in s or "[WARNING]" in s:
+        return "warn"
     return "info"
 
 

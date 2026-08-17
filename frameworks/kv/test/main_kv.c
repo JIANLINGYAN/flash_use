@@ -26,6 +26,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+/*
+ * 测试组件日志（仅测试程序使用，不污染 kv_store 框架本身）。
+ * 级别前缀与后端 parse_output / _classify_line 约定一致：
+ *   [INFO] 普通信息  [OK] 通过  [FAIL] 失败  [WARN] 警告
+ * STATS_JSON:/WEARMAP: 为后端专用数据行，不含级别前缀。
+ */
+#define LOG_INFO(fmt, ...) printf("[INFO] " fmt "\n", ##__VA_ARGS__)
+#define LOG_WARN(fmt, ...) printf("[WARN] " fmt "\n", ##__VA_ARGS__)
+
 #define KV_BIN   "kv_demo.bin"
 
 static int g_fail = 0;
@@ -136,6 +145,8 @@ static void func_item(flash_dev_t *dev, uint32_t base, uint32_t size,
                 if (kv_read(dev, (uint16_t)k, rbuf, &rl) == FLASH_OK) (*acc_ops)++;
             }
         }
+        LOG_INFO("  压测进度 round=%u/%u 累计操作=%u 当前丢失=%u",
+                 r + 1, rounds, *acc_ops, *acc_lost + lost);
     }
     free(buf); free(rbuf);
     *acc_lost += lost;
@@ -160,6 +171,7 @@ static int has_test(const char *tests, const char *name)
 int main(void)
 {
     printf("=== KV 存储逻辑框架运行验证 ===\n");
+    LOG_INFO("启动 KV 运行验证（测试组件日志）");
 
     flash_config_t cfg = {
         .type = (flash_type_t)env_long("SIM_TYPE", FLASH_TYPE_NOR),
@@ -175,16 +187,27 @@ int main(void)
         .bad_blocks = (uint32_t)env_long("SIM_BAD_N", 0),
         .bad_ratio = (uint32_t)env_long("SIM_BAD_R", 0),
     };
+    LOG_INFO("介质配置: type=%d total=%u erase=%u write=%u endurance=%u",
+             (int)cfg.type, cfg.total_size, cfg.erase_size,
+             cfg.write_size, cfg.erase_cycles);
     flash_dev_t *dev = flash_sim_init(&cfg);
-    if (!dev) { printf("  Flash 初始化失败!\n"); return 1; }
+    if (!dev) {
+        printf("  [FAIL] Flash 初始化失败!\n");
+        LOG_WARN("flash_sim_init 失败，请检查介质配置与 bin 路径");
+        return 1;
+    }
+    LOG_INFO("介质初始化完成");
 
     uint32_t capacity = (uint32_t)env_long("KV_CAPACITY",
                                 (cfg.total_size >= 8192) ? 8192 : cfg.total_size);
+    LOG_INFO("KV 区域容量=%u 字节，开始整区擦除", capacity);
     flash_sim_erase(dev, 0, capacity);
+    LOG_INFO("整区擦除完成");
 
     const char *tests = getenv("KV_TESTS");
     const char *items = getenv("KV_ITEMS");
     uint32_t rounds = (uint32_t)env_long("KV_ROUNDS", 20);
+    LOG_INFO("启用的测试项: %s", tests && *tests ? tests : "(全部基础项)");
 
     if (has_test(tests, "write_read")) { printf("\n[测试项] 基础写入/读取\n"); t_write_read(dev, 0, capacity); }
     if (has_test(tests, "update"))     { printf("\n[测试项] 更新覆盖\n"); t_update(dev, 0, capacity); }
@@ -194,6 +217,8 @@ int main(void)
 
     if (has_test(tests, "func")) {
         printf("\n[测试项] 功能压测（条目表）\n");
+        LOG_INFO("功能压测: rounds=%u 条目表=%s", rounds,
+                 (items && *items) ? items : "(默认 32B/50条/50%)");
         uint32_t acc_ops = 0, acc_lost = 0;
         if (items && *items) {
             const char *p = items;
@@ -210,6 +235,7 @@ int main(void)
         } else {
             func_item(dev, 0, capacity, 32, 50, 50, rounds, &acc_ops, &acc_lost);
         }
+        LOG_INFO("功能压测结束: 总操作=%u 数据丢失=%u", acc_ops, acc_lost);
         flash_stats_t fst; flash_sim_get_stats(dev, &fst);
         printf("STATS_JSON:{\"mode\":\"func\",\"ops\":%u,\"lost\":%u,"
                "\"block_us\":%llu,\"reads\":%u,\"writes\":%u,\"erases\":%u,"
@@ -245,8 +271,10 @@ int main(void)
             free(map);
         }
     }
+    LOG_INFO("磨损图输出完成（%u 块）", bc);
 
     flash_sim_deinit(dev);
+    LOG_INFO("介质释放，验证结束: %s", g_fail == 0 ? "全部通过" : "存在失败");
     printf("\n=== KV 运行验证结果: %s ===\n", g_fail == 0 ? "全部通过" : "存在失败");
     return g_fail == 0 ? 0 : 1;
 }
