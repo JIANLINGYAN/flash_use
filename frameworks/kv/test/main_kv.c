@@ -212,10 +212,12 @@ int main(void)
         }
         flash_stats_t fst; flash_sim_get_stats(dev, &fst);
         printf("STATS_JSON:{\"mode\":\"func\",\"ops\":%u,\"lost\":%u,"
-               "\"block_us\":%llu,\"reads\":%u,\"writes\":%u,\"erases\":%u}\n",
+               "\"block_us\":%llu,\"reads\":%u,\"writes\":%u,\"erases\":%u,"
+               "\"erase_cycles\":%u}\n",
                acc_ops, acc_lost,
                (unsigned long long)(fst.read_time_us + fst.write_time_us + fst.erase_time_us),
-               fst.total_reads, fst.total_writes, fst.total_erases);
+               fst.total_reads, fst.total_writes, fst.total_erases,
+               cfg.erase_cycles);
         expect("功能压测数据丢失为0", acc_lost == 0);
     } else {
         /* 非功能压测模式也输出基础统计 */
@@ -223,12 +225,13 @@ int main(void)
         printf("STATS_JSON:{\"mode\":\"basic\",\"reads\":%u,\"writes\":%u,"
                "\"erases\":%u,\"write_bytes\":%u,\"max_cycles\":%u,"
                "\"avg_cycles\":%u,\"read_us\":%llu,\"write_us\":%llu,"
-               "\"erase_us\":%llu,\"bad_blocks\":%u}\n",
+               "\"erase_us\":%llu,\"bad_blocks\":%u,\"erase_cycles\":%u}\n",
                st.total_reads, st.total_writes, st.total_erases,
                st.total_write_bytes, st.max_erase_cycles, st.avg_erase_cycles,
                (unsigned long long)st.read_time_us,
                (unsigned long long)st.write_time_us,
-               (unsigned long long)st.erase_time_us, st.bad_block_count);
+               (unsigned long long)st.erase_time_us, st.bad_block_count,
+               cfg.erase_cycles);
     }
 
     uint32_t bc = flash_sim_block_count(dev);

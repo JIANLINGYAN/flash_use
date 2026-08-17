@@ -37,20 +37,20 @@ static long env_long(const char *k, long def)
 }
 
 /* 输出统计与磨损图（后端按前缀解析） */
-static void dump_stats(flash_dev_t *dev)
+static void dump_stats(flash_dev_t *dev, uint32_t erase_cycles)
 {
     flash_stats_t st;
     flash_sim_get_stats(dev, &st);
     printf("STATS_JSON:{\"reads\":%u,\"writes\":%u,\"erases\":%u,"
            "\"write_bytes\":%u,\"max_cycles\":%u,\"avg_cycles\":%u,"
            "\"read_us\":%llu,\"write_us\":%llu,\"erase_us\":%llu,"
-           "\"bad_blocks\":%u}\n",
+           "\"bad_blocks\":%u,\"erase_cycles\":%u}\n",
            st.total_reads, st.total_writes, st.total_erases,
            st.total_write_bytes, st.max_erase_cycles, st.avg_erase_cycles,
            (unsigned long long)st.read_time_us,
            (unsigned long long)st.write_time_us,
            (unsigned long long)st.erase_time_us,
-           st.bad_block_count);
+           st.bad_block_count, erase_cycles);
 
     uint32_t n = flash_sim_block_count(dev);
     if (n > 0) {
@@ -112,7 +112,7 @@ int main(void)
                    FLASH_ERR_WRITE);
 
     printf("  [info] 性能与磨损统计：\n");
-    dump_stats(nor);
+    dump_stats(nor, cfg.erase_cycles);
 
     flash_sim_deinit(nor);
 

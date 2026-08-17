@@ -270,15 +270,16 @@
     els.perfStats.classList.remove("hidden");
   }
 
-  function renderWearMap(wearmap, maxCycle) {
+  function renderWearMap(wearmap, eraseCycles) {
     if (!wearmap || !wearmap.length) { els.wearWrap.classList.add("hidden"); return; }
-    var max = maxCycle || Math.max.apply(null, wearmap.concat([1]));
+    /* 用标称擦写寿命作为分母（而非当前最大值），1次/100000次 = 0.001% */
+    var maxCycle = Math.max.apply(null, wearmap.concat([1]));
+    var denom = (eraseCycles && eraseCycles > 0) ? eraseCycles : maxCycle;
     var c = els.wearCanvas, ctx = c.getContext("2d");
     var W = c.width, H = c.height;
     ctx.clearRect(0, 0, W, H);
 
     var n = wearmap.length;
-    /* GitHub 风格方块热力图：自动计算列数，每块约 12~14px */
     var cellSize = 13;
     var gap = 3;
     var cols = Math.floor((W - 20) / (cellSize + gap));
@@ -289,7 +290,7 @@
 
     for (var i = 0; i < n; i++) {
       var v = wearmap[i];
-      var ratio = max > 0 ? v / max : 0;
+      var ratio = denom > 0 ? v / denom : 0;
       /* GitHub 贡献图配色：5 级 */
       var hue, sat, lgt;
       if (ratio === 0)       { hue = 210; sat = "10%"; lgt = "22%"; }
@@ -335,10 +336,10 @@
     ctx.textAlign = "left";
     ctx.fillStyle = "#8b97ad";
     ctx.font = "11px sans-serif";
-    ctx.fillText("共 " + n + " 块 · 最高擦写 " + max + " 次", lx + 10, ly + 16);
+    ctx.fillText("共 " + n + " 块 · 寿命 " + denom + " · 最高 " + maxCycle, lx + 10, ly + 16);
 
     els.wearLegend.textContent =
-      "GitHub 风格热力图：每个方块代表一个擦除块，颜色越深表示磨损越高。";
+      "GitHub 风格热力图：颜色 = 当前擦写次数 / 标称寿命，越接近寿命上限颜色越深。";
     els.wearWrap.classList.remove("hidden");
   }
 
@@ -385,7 +386,7 @@
       els.meta.textContent = "已选：" + nameOf(selectedId) +
         "（返回码 " + (result.return_code != null ? result.return_code : "-") + "）";
       renderPerfStats(result.stats);
-      renderWearMap(result.wearmap, result.stats ? result.stats.max_cycles : null);
+      renderWearMap(result.wearmap, result.stats ? result.stats.erase_cycles : null);
       els.runBtn.disabled = false;
     }).catch(function (e) {
       appendOut(els.output, "stderr", "请求失败：" + e);
