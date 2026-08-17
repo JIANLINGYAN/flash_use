@@ -1,3 +1,4 @@
 # 模拟基座生成的物理介质镜像与编译产物
 *.bin
 flash_sim_test
+kv_test
