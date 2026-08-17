@@ -4,6 +4,9 @@ flash_sim_test
 kv_test
 /tmp/flash_use_*_test
 
+# 导入框架运行时生成（imports/<id>/ 含落盘 BIN，按需可重新生成）
+imports/
+
 # Python
 __pycache__/
 *.pyc

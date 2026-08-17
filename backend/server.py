@@ -29,6 +29,11 @@ from urllib.parse import urlparse
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FRONTEND_DIR = os.path.join(ROOT, "frontend")
 SIMULATOR_DIR = os.path.join(ROOT, "simulator")
+IMPORTS_DIR = os.path.join(ROOT, "imports")
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import generator
+import importer
 
 
 def find_gcc():
@@ -60,6 +65,10 @@ FRAMEWORKS = [
         "sources": ["simulator/flash_sim.c", "simulator/test/main_sim.c"],
         "includes": ["simulator"],
         "workdir": "simulator/test",
+        "params": [
+            {"key": "erase_size", "label": "擦除块大小(字节)", "default": 4096},
+            {"key": "page_size", "label": "最小写入单位(字节)", "default": 1},
+        ],
     },
     {
         "id": "kv",
@@ -73,6 +82,11 @@ FRAMEWORKS = [
         ],
         "includes": ["simulator", "frameworks/kv"],
         "workdir": "frameworks/kv/test",
+        "params": [
+            {"key": "capacity", "label": "KV 区容量(字节)", "default": 8192},
+            {"key": "erase_size", "label": "擦除块大小(字节)", "default": 4096},
+            {"key": "page_size", "label": "最小写入单位(字节)", "default": 256},
+        ],
     },
     # 后续框架（fs / baremetal / ota）在此追加注册即可被前端发现
 ]
@@ -116,7 +130,12 @@ def parse_output(text):
 
 
 def run_framework(fid):
-    """编译并运行指定框架测试，返回结果字典。"""
+    """编译并运行指定框架测试，返回结果字典。支持内置与已导入框架。"""
+    # 已导入的自定义框架
+    reg = importer.load_registry()
+    if fid in reg:
+        return _run_imported(fid, reg[fid])
+
     fw = get_framework(fid)
     if not fw:
         return {"success": False, "error": "未知框架: %s" % fid, "lines": []}
@@ -144,16 +163,10 @@ def run_framework(fid):
         return {"success": False, "error": "编译超时", "lines": []}
 
     if build.returncode != 0:
-        # 编译失败：返回编译错误输出
         err_lines = [{"level": "fail", "text": l}
                      for l in build.stderr.splitlines()]
-        return {
-            "success": False,
-            "error": "编译失败",
-            "lines": err_lines,
-        }
+        return {"success": False, "error": "编译失败", "lines": err_lines}
 
-    # 运行（在工作目录内，使 BIN 落盘到框架 test 目录）
     try:
         t0 = time.time()
         run = subprocess.run([tmp_exe], cwd=workdir,
@@ -165,7 +178,56 @@ def run_framework(fid):
     parsed = parse_output(run.stdout)
     parsed["elapsed_ms"] = int(elapsed * 1000)
     parsed["return_code"] = run.returncode
-    # 程序非零退出码表示存在失败
+    if run.returncode != 0:
+        parsed["success"] = False
+    if run.stderr.strip():
+        for l in run.stderr.splitlines():
+            parsed["lines"].append({"level": "stderr", "text": l})
+    return parsed
+
+
+def _run_imported(fid, manifest):
+    """编译并运行已导入框架（位于 imports/<id>/）。"""
+    gcc = find_gcc()
+    if not gcc:
+        return {"success": False, "error": "未找到 gcc 编译器", "lines": []}
+
+    dest = os.path.join(IMPORTS_DIR, fid)
+    if not os.path.isdir(dest):
+        return {"success": False, "error": "导入框架目录缺失: %s" % fid, "lines": []}
+
+    entry = manifest.get("entry", "test_main.c")
+    sim_c = os.path.join(ROOT, "simulator", "flash_sim.c")
+    entry_src = os.path.join(dest, entry)
+    lib_c = os.path.join(dest, manifest.get("lib", "") + ".c") \
+        if manifest.get("lib") else None
+
+    compile_srcs = [sim_c, entry_src]
+    if lib_c and os.path.exists(lib_c):
+        compile_srcs.append(lib_c)
+
+    tmp_exe = os.path.join(tempfile.gettempdir(), "flash_use_import_%s" % fid)
+    cmd = [gcc, "-std=c99", "-Wall", "-Wextra",
+           "-I" + os.path.join(ROOT, "simulator"), "-I" + dest,
+           "-o", tmp_exe] + compile_srcs
+
+    build = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    if build.returncode != 0:
+        return {"success": False, "error": "编译失败",
+                "lines": [{"level": "fail", "text": l}
+                          for l in build.stderr.splitlines()]}
+
+    try:
+        t0 = time.time()
+        run = subprocess.run([tmp_exe], cwd=dest,
+                             capture_output=True, text=True, timeout=60)
+        elapsed = time.time() - t0
+    except subprocess.TimeoutExpired:
+        return {"success": False, "error": "运行超时", "lines": []}
+
+    parsed = parse_output(run.stdout)
+    parsed["elapsed_ms"] = int(elapsed * 1000)
+    parsed["return_code"] = run.returncode
     if run.returncode != 0:
         parsed["success"] = False
     if run.stderr.strip():
@@ -203,6 +265,17 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_bytes(self, body, ctype, filename=None):
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        if filename:
+            self.send_header("Content-Disposition",
+                             'attachment; filename="%s"' % filename)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         parsed = urlparse(self.path)
         route = parsed.path
@@ -216,29 +289,55 @@ class Handler(BaseHTTPRequestHandler):
             self._send_file(os.path.join(FRONTEND_DIR, "style.css"),
                             "text/css; charset=utf-8")
         elif route == "/api/frameworks":
-            self._send_json({
-                "frameworks": [
-                    {"id": f["id"], "name": f["name"], "desc": f["desc"]}
-                    for f in FRAMEWORKS
-                ]
-            })
+            builtin = [
+                {"id": f["id"], "name": f["name"], "desc": f["desc"],
+                 "params": f.get("params", [])}
+                for f in FRAMEWORKS
+            ]
+            imported = importer.imported_frameworks()
+            self._send_json({"frameworks": builtin + imported})
         else:
             self.send_error(404, "Not Found")
 
     def do_POST(self):
         parsed = urlparse(self.path)
-        if parsed.path != "/api/run":
-            self.send_error(404, "Not Found")
-            return
         length = int(self.headers.get("Content-Length", 0) or 0)
         raw = self.rfile.read(length) if length else b"{}"
         try:
             payload = json.loads(raw.decode("utf-8"))
         except (ValueError, UnicodeDecodeError):
             payload = {}
-        fid = payload.get("framework", "")
-        result = run_framework(fid)
-        self._send_json(result)
+
+        if parsed.path == "/api/run":
+            fid = payload.get("framework", "")
+            result = run_framework(fid)
+            self._send_json(result)
+        elif parsed.path == "/api/generate":
+            fid = payload.get("framework", "")
+            params = payload.get("params", {})
+            try:
+                zip_bytes, manifest = generator.generate_zip(fid, params)
+            except RuntimeError as e:
+                self._send_json({"success": False, "error": str(e)}, code=400)
+                return
+            fname = "%s_library.zip" % manifest.get("lib", fid)
+            self._send_bytes(zip_bytes, "application/zip", fname)
+        elif parsed.path == "/api/import":
+            file_b64 = payload.get("file_b64", "")
+            if not file_b64:
+                self._send_json({"success": False, "error": "未收到文件数据"}, code=400)
+                return
+            try:
+                import base64
+                zip_bytes = base64.b64decode(file_b64)
+            except Exception:
+                self._send_json({"success": False, "error": "文件解码失败"}, code=400)
+                return
+            ok, res = importer.import_zip(zip_bytes)
+            self._send_json({"success": ok, **res},
+                            code=200 if ok else 400)
+        else:
+            self.send_error(404, "Not Found")
 
 
 def main():

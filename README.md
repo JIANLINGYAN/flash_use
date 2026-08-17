@@ -41,25 +41,44 @@ gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/kv \
     && /tmp/kv
 ```
 
-### 2. 前端模拟运行界面
+### 2. 前端（模拟运行 + 代码生成 + 导入闭环）
 ```bash
 python3 backend/server.py --port 8000
 # 浏览器打开 http://localhost:8000
 ```
-- 选择框架（模拟基座 / KV/NVS）
-- 点击「运行测试」→ 后端编译并运行对应 C 测试程序
-- 前端实时展示逐行结果（OK 绿 / FAIL 红）与汇总（通过/失败/耗时/结论）
+页面三段式流程：
+1. **选择框架并运行测试**：选内置/已导入框架 → 「运行测试」→ 逐行结果 + 汇总。
+2. **代码生成（导出库文件）**：选框架、填参数 → 「生成并下载」→ 下载 zip 包
+   （含 `.c/.h` + `test_main.c` 自检入口 + `PORTING.md` 移植说明 + `manifest.json`）。
+3. **导入库文件（闭环验证）**：上传刚下载的 zip → 后端校验是否符合模拟基座接口要求
+   （`manifest.requires=="flash_sim"` 且源码 `#include "flash_sim.h"`）、编译运行自带自检 →
+   通过后注册为可用框架，出现在①中可直接「运行测试」。
 
 ## 架构链路
 ```
-前端(浏览器) → 后端 API(Python) → 编译运行 C 测试程序 → 模拟基座 → BIN 物理介质
+前端(浏览器) → 后端 API(Python)
+                ├─ 代码生成引擎(generator.py) → 导出 zip 库包
+                ├─ 导入校验(importer.py)     → 解压/校验/编译运行/注册
+                └─ 仿真服务                    → 编译运行 C 测试程序 → 模拟基座 → BIN 物理介质
 ```
 所有生成的 C 库均可脱离本平台，直接移植到真实 MCU Flash 驱动（仅需将
-`flash_sim_*` 替换为真实驱动实现）。
+`flash_sim_*` 替换为真实驱动实现，见包内 `PORTING.md`）。
+
+## 包格式（导入契约）
+```
+xxx_library.zip
+├── <lib>.c / <lib>.h   核心库（平台无关）
+├── test_main.c         标自检入口（对接 flash_sim.h）
+├── PORTING.md          移植说明
+└── manifest.json       { id, name, requires:"flash_sim", entry, lib, params }
+```
+导入校验规则：缺 manifest、requires≠flash_sim、源码未依赖 flash_sim.h、
+或编译/运行自带自检失败，均会被拒绝并给出原因。
 
 ## 完成状态
 - [x] 模块一 模拟基座（NOR/NAND/EEPROM + BIN 落盘自检）
 - [x] 模块二 KV/NVS 框架（掉电安全 + CRC + 压实 GC）+ 运行验证
-- [x] 模块四 前端模拟运行界面（选框架 / 运行 / 看结果）
-- [ ] 模块三 AI 接口与代码生成引擎（规划中）
+- [x] 模块三 代码生成引擎（导出库包：.c/.h + 移植说明）+ 导入闭环校验
+- [x] 模块四 前端模拟运行界面（选框架 / 运行 / 生成下载 / 导入验证）
+- [ ] 模块三 AI 接口（规划中，本次未实现）
 - [ ] 模块二 文件系统 / 裸机双备份 / OTA 差分框架（规划中）
