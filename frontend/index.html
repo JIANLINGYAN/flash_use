@@ -66,6 +66,17 @@
         <div class="verdict" id="verdict">—</div>
       </div>
       <div id="perf-stats" class="perf-stats hidden"></div>
+
+      <!-- 运行时日志：长时间测试时实时滚动打印，避免用户干等最终结果 -->
+      <div id="rt-log" class="rt-log">
+        <div class="rt-log-head">
+          <span class="rt-log-title">运行时日志（实时）</span>
+          <span id="rt-log-status" class="rt-log-status">空闲</span>
+          <button id="rt-log-clear" class="btn btn-sm">清空</button>
+        </div>
+        <div id="rt-log-body" class="rt-log-body"><span class="hint">点击「运行测试」后，编译与运行日志将实时显示在这里。</span></div>
+      </div>
+
       <pre id="output" class="output"><span class="hint">选择框架后点击「运行测试」，结果将在此显示。</span></pre>
       <div id="wear-wrap" class="wear-wrap hidden">
         <h3>整片磨损分布（每块擦写次数，绿→红表示磨损升高）</h3>

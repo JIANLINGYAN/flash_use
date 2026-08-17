@@ -13,6 +13,10 @@
     refreshBtn: document.getElementById("refresh-btn"),
     output: document.getElementById("output"),
     summary: document.getElementById("result-summary"),
+    rtLog: document.getElementById("rt-log"),
+    rtLogBody: document.getElementById("rt-log-body"),
+    rtLogStatus: document.getElementById("rt-log-status"),
+    rtLogClear: document.getElementById("rt-log-clear"),
     statOk: document.getElementById("stat-ok"),
     statFail: document.getElementById("stat-fail"),
     statTime: document.getElementById("stat-time"),
@@ -431,27 +435,134 @@
     els.wearWrap.classList.add("hidden");
     els.output.innerHTML = '<span class="hint">编译并运行测试程序，请稍候…</span>';
 
-    api("POST", "/api/run", {
+    // 运行时日志窗口：清空并切到"运行中"
+    els.rtLogBody.innerHTML = "";
+    els.rtLogStatus.textContent = "运行中…";
+    els.rtLogStatus.className = "rt-log-status running";
+    var collected = [];      // 收集到的日志行 {level, text}
+    var statsLine = null;    // STATS_JSON 行（若有）
+    var wearRaw = null;      // WEARMAP 行（若有）
+
+    var body = JSON.stringify({
       framework: selectedId, config: cfg.config, test_config: cfg.test_config
-    }).then(function (result) {
-      renderOutput(result);
-      els.summary.classList.remove("hidden");
-      els.statOk.textContent = result.ok_count || 0;
-      els.statFail.textContent = result.fail_count || 0;
-      els.statTime.textContent = result.elapsed_ms || 0;
-      var ok = result.success === true;
-      els.verdict.className = "verdict " + (ok ? "ok" : "fail");
-      els.verdict.textContent = ok ? "✓ 全部通过" : "✗ 存在失败";
-      setPill(ok ? "ok" : "fail", ok ? "通过" : "失败");
-      els.meta.textContent = "已选：" + nameOf(selectedId) +
-        "（返回码 " + (result.return_code != null ? result.return_code : "-") + "）";
-      renderPerfStats(result.stats);
-      renderWearMap(result.wearmap, result.stats ? result.stats.erase_cycles : null);
-      els.runBtn.disabled = false;
+    });
+
+    // 用 fetch + ReadableStream 消费 SSE（支持 POST，且便于超时/中断控制）
+    fetch("/api/run/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: body
+    }).then(function (resp) {
+      if (!resp.ok) throw new Error("HTTP " + resp.status);
+      var reader = resp.body.getReader();
+      var dec = new TextDecoder("utf-8");
+      var buf = "";
+      var pendingLines = [];
+      var evName = "log";
+
+      function appendLog(level, text) {
+        collected.push({ level: level, text: text });
+        appendOut(els.rtLogBody, level, text);
+        // 轻量节流滚动：每 50ms 滚一次底，避免高频重绘卡 UI
+        if (!appendLog._t) {
+          appendLog._t = setTimeout(function () {
+            appendLog._t = null;
+            els.rtLogBody.scrollTop = els.rtLogBody.scrollHeight;
+          }, 50);
+        }
+        // 捕获 STATS_JSON / WEARMAP 汇总行（用前缀长度切分，避免 off-by-one）
+        if (text.indexOf("STATS_JSON:") === 0) {
+          statsLine = text.slice("STATS_JSON:".length).trim();
+        }
+        if (text.indexOf("WEARMAP:") === 0) {
+          wearRaw = text.slice("WEARMAP:".length).trim();
+        }
+      }
+
+      function pump() {
+        return reader.read().then(function (r) {
+          if (r.done) return;
+          buf += dec.decode(r.value, { stream: true });
+          // 按 SSE 帧切分（event:/data:/空行）
+          var frames = buf.split("\n\n");
+          buf = frames.pop();
+          frames.forEach(function (fr) {
+            var ev = "log", data = "";
+            fr.split("\n").forEach(function (ln) {
+              if (ln.indexOf("event:") === 0) ev = ln.slice(6).trim();
+              else if (ln.indexOf("data:") === 0) data += ln.slice(5).trim();
+            });
+            if (!data) return;
+            var obj;
+            try { obj = JSON.parse(data); } catch (e) { return; }
+            if (ev === "end") return;
+            if (ev === "log") {
+              appendLog(obj.level || "info", obj.text || "");
+            } else if (ev === "build") {
+              appendLog("info", obj.text || "");
+            }
+          });
+          return pump();
+        });
+      }
+      return pump();
+    }).then(function () {
+      // 流结束：用收集到的日志渲染最终结果区，并统计通过/失败
+      finalizeRun(collected, statsLine, wearRaw);
     }).catch(function (e) {
-      appendOut(els.output, "stderr", "请求失败：" + e);
+      appendOut(els.rtLogBody, "stderr", "请求失败：" + e);
+      els.rtLogStatus.textContent = "错误";
+      els.rtLogStatus.className = "rt-log-status fail";
       setPill("fail", "错误");
       els.runBtn.disabled = false;
+    });
+
+    // 中断：若用户在运行中再次点击（这里简单提供 cancel），当前实现在
+    // fetch 完成前 runBtn 禁用，无法直接重入，避免并发。
+  }
+
+  /*
+   * 流式日志收集完成后：把日志渲染成最终结果区，统计 OK/FAIL 并更新
+   * 顶部状态、磨损图与性能图（若日志中含 STATS_JSON/WEARMAP）。
+   */
+  function finalizeRun(lines, statsLine, wearRaw) {
+    var okCount = 0, failCount = 0;
+    els.output.innerHTML = "";
+    lines.forEach(function (ln) {
+      if (ln.level === "ok") okCount++;
+      else if (ln.level === "fail") failCount++;
+      appendOut(els.output, ln.level, ln.text);
+    });
+
+    var ok = failCount === 0;
+    els.summary.classList.remove("hidden");
+    els.statOk.textContent = okCount;
+    els.statFail.textContent = failCount;
+    els.statTime.textContent = "?";
+    els.verdict.className = "verdict " + (ok ? "ok" : "fail");
+    els.verdict.textContent = ok ? "✓ 全部通过" : "✗ 存在失败";
+    setPill(ok ? "ok" : "fail", ok ? "通过" : "失败");
+    els.meta.textContent = "已选：" + nameOf(selectedId);
+
+    // 解析 STATS_JSON 渲染性能/磨损
+    var stats = null;
+    if (statsLine) {
+      try { stats = JSON.parse(statsLine); } catch (e) { stats = null; }
+    }
+    if (stats) {
+      renderPerfStats(stats);
+      if (wearRaw) renderWearMap(parseWearList(wearRaw), stats.erase_cycles);
+    }
+    els.rtLogStatus.textContent = ok ? "完成（通过）" : "完成（失败）";
+    els.rtLogStatus.className = "rt-log-status " + (ok ? "ok" : "fail");
+    els.runBtn.disabled = false;
+  }
+
+  // 把 "1,2,3" 形式的 WEARMAP 解析成数组
+  function parseWearList(s) {
+    return s.split(",").map(function (x) {
+      var n = parseInt(x, 10);
+      return isNaN(n) ? 0 : n;
     });
   }
 
@@ -550,5 +661,8 @@
   els.importBtn.onclick = doImport;
   els.runBtn.onclick = runTest;
   els.refreshBtn.onclick = loadFrameworks;
+  els.rtLogClear.onclick = function () {
+    els.rtLogBody.innerHTML = '<span class="hint">日志已清空。</span>';
+  };
   loadFrameworks();
 })();

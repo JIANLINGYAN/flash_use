@@ -432,6 +432,146 @@ def run_framework(fid, config=None, test_config=None):
     return parsed
 
 
+# ---------------------------------------------------------------------------
+# 流式运行（SSE）：边编译边运行，实时把输出推给前端，避免长时间测试时
+# 用户只能干等最终结果。生成器 yield 事件字典：
+#   {"event": "build",  "text": <编译日志行>}
+#   {"event": "log",    "level": <info|ok|fail|stderr>, "text": <运行日志行>}
+#   {"event": "done",   "result": <汇总字典>}
+# 速度控制：每条运行日志推送前小幅节流（~15ms），避免浏览器高频重绘卡顿。
+# ---------------------------------------------------------------------------
+def _compile_exe(sources, includes, fid):
+    """编译测试程序，返回 (tmp_exe, build)。"""
+    gcc = find_gcc()
+    if not gcc:
+        return None, None
+    inc_flags = ["-I" + os.path.join(ROOT, d) for d in includes]
+    tmp_exe = os.path.join(tempfile.gettempdir(), "flash_use_%s_test" % fid)
+    cmd = [gcc, "-std=c99", "-Wall", "-Wextra"] + inc_flags + \
+          ["-o", tmp_exe] + sources
+    try:
+        build = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        return None, None
+    return tmp_exe, build
+
+
+def _classify_line(line):
+    """根据行内容粗略判断日志等级（与 OK/FAIL 判定一致）。"""
+    s = line.strip()
+    if "[OK]" in s or "PASS" in s.upper() or s.startswith("✓"):
+        return "ok"
+    if "[FAIL]" in s or "[ERROR]" in s or "FAIL" in s.upper():
+        return "fail"
+    return "info"
+
+
+def _stream_run(exe, workdir, env, fid):
+    """以 Popen 实时读取运行输出，逐行 yield 日志事件；结束 yield done 事件。"""
+    import select
+    try:
+        t0 = time.time()
+        proc = subprocess.Popen([exe], cwd=workdir, env=env,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 text=True, bufsize=1)
+    except OSError as e:
+        yield {"event": "log", "level": "stderr", "text": "启动失败: %s" % e}
+        yield {"event": "done", "result": {"success": False,
+                                           "error": "启动失败: %s" % e, "lines": []}}
+        return
+
+    stderr_buf = []
+    have_sel = hasattr(select, "select")
+    while True:
+        if have_sel:
+            rlist, _, _ = select.select([proc.stdout, proc.stderr], [], [], 0.1)
+        else:
+            rlist = [proc.stdout]
+        if proc.stdout in rlist:
+            line = proc.stdout.readline()
+            if line != "":
+                line = line.rstrip("\n")
+                yield {"event": "log", "level": _classify_line(line),
+                       "text": line}
+                time.sleep(0.015)  # 小幅节流，避免 UI 高频重绘
+        if proc.stderr in rlist:
+            el = proc.stderr.readline()
+            if el != "":
+                stderr_buf.append(el.rstrip("\n"))
+        if proc.poll() is not None:
+            for line in proc.stdout:
+                yield {"event": "log", "level": _classify_line(line.rstrip("\n")),
+                       "text": line.rstrip("\n")}
+                time.sleep(0.015)
+            break
+    for el in stderr_buf:
+        yield {"event": "log", "level": "stderr", "text": el}
+
+    elapsed = time.time() - t0
+    yield {"event": "done", "result": {
+        "success": proc.returncode == 0,
+        "return_code": proc.returncode,
+        "elapsed_ms": int(elapsed * 1000),
+    }}
+
+
+def run_framework_stream(fid, config=None, test_config=None):
+    """流式运行生成器：先推 build 事件，再推 log 事件，最后推 done 事件。"""
+    reg = importer.load_registry()
+    builtin_ids = {f["id"] for f in FRAMEWORKS}
+    if fid in reg:
+        manifest = reg[fid]
+        dest = os.path.join(IMPORTS_DIR, fid)
+        sim_c = os.path.join(ROOT, "simulator", "flash_sim.c")
+        entry_src = os.path.join(dest, manifest.get("entry", "test_main.c"))
+        srcs = [sim_c, entry_src]
+        lib_sources = manifest.get("lib_sources")
+        if lib_sources:
+            for ls in lib_sources:
+                p = os.path.join(dest, ls)
+                if os.path.exists(p):
+                    srcs.append(p)
+        else:
+            lib_c = os.path.join(dest, manifest.get("lib", "") + ".c") \
+                if manifest.get("lib") else None
+            if lib_c and os.path.exists(lib_c):
+                srcs.append(lib_c)
+        exe, build = _compile_exe(srcs, [os.path.join(ROOT, "simulator"), dest], fid)
+        workdir = dest
+    else:
+        fw = get_framework(fid)
+        if not fw:
+            yield {"event": "done", "result": {"success": False,
+                                               "error": "未知框架: %s" % fid,
+                                               "lines": []}}
+            return
+        src_paths = [os.path.join(ROOT, s) for s in fw["sources"]]
+        for p in src_paths:
+            if not os.path.exists(p):
+                yield {"event": "done", "result": {"success": False,
+                                                   "error": "源文件缺失: %s" % p,
+                                                   "lines": []}}
+                return
+        exe, build = _compile_exe(src_paths, fw["includes"], fid)
+        workdir = os.path.join(ROOT, fw["workdir"])
+
+    if not exe or build is None:
+        yield {"event": "log", "level": "stderr", "text": "未找到 gcc 编译器，无法编译"}
+        yield {"event": "done", "result": {"success": False,
+                                           "error": "未找到 gcc 编译器", "lines": []}}
+        return
+    if build.returncode != 0:
+        for l in build.stderr.splitlines():
+            yield {"event": "log", "level": "fail", "text": l}
+        yield {"event": "done", "result": {"success": False, "error": "编译失败",
+                                           "lines": []}}
+        return
+
+    yield {"event": "log", "level": "info", "text": "[build] 编译成功，开始运行…"}
+    for ev in _stream_run(exe, workdir, _build_env(config, test_config), fid):
+        yield ev
+
+
 def _run_imported(fid, manifest, config=None, test_config=None):
     """编译并运行已导入框架（位于 imports/<id>/）。"""
     gcc = find_gcc()
@@ -506,6 +646,27 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _stream_run_sse(self, fid, config, test_config):
+        """SSE 流式运行：以 text/event-stream 实时推送编译/运行日志。"""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        try:
+            for ev in run_framework_stream(fid, config, test_config):
+                data = json.dumps(ev, ensure_ascii=False)
+                # SSE 帧：event: <type>\ndata: <json>\n\n
+                self.wfile.write(("event: %s\n" % ev.get("event", "log")).encode("utf-8"))
+                self.wfile.write(("data: %s\n\n" % data).encode("utf-8"))
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        # 结束帧
+        self.wfile.write(b"event: end\ndata: {}\n\n")
+        self.wfile.flush()
+
     def _send_file(self, path, ctype):
         try:
             with open(path, "rb") as f:
@@ -578,6 +739,11 @@ class Handler(BaseHTTPRequestHandler):
             test_config = payload.get("test_config", {})
             result = run_framework(fid, config, test_config)
             self._send_json(result)
+        elif parsed.path == "/api/run/stream":
+            fid = payload.get("framework", "")
+            config = payload.get("config", {})
+            test_config = payload.get("test_config", {})
+            self._stream_run_sse(fid, config, test_config)
         elif parsed.path == "/api/generate":
             fid = payload.get("framework", "")
             params = payload.get("params", {})
