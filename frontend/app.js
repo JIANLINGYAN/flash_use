@@ -442,6 +442,7 @@
     var collected = [];      // 收集到的日志行 {level, text}
     var statsLine = null;    // STATS_JSON 行（若有）
     var wearRaw = null;      // WEARMAP 行（若有）
+    var doneResult = {};       // done 事件中的汇总结果
 
     var body = JSON.stringify({
       framework: selectedId, config: cfg.config, test_config: cfg.test_config
@@ -500,6 +501,8 @@
               appendLog(obj.level || "info", obj.text || "");
             } else if (ev === "build") {
               appendLog("info", obj.text || "");
+            } else if (ev === "done") {
+              doneResult = obj.result || {};
             }
           });
           return pump();
@@ -508,7 +511,7 @@
       return pump();
     }).then(function () {
       // 流结束：用收集到的日志渲染最终结果区，并统计通过/失败
-      finalizeRun(collected, statsLine, wearRaw);
+      finalizeRun(collected, statsLine, wearRaw, doneResult);
     }).catch(function (e) {
       appendOut(els.rtLogBody, "stderr", "请求失败：" + e);
       els.rtLogStatus.textContent = "错误";
@@ -525,7 +528,7 @@
    * 流式日志收集完成后：把日志渲染成最终结果区，统计 OK/FAIL 并更新
    * 顶部状态、磨损图与性能图（若日志中含 STATS_JSON/WEARMAP）。
    */
-  function finalizeRun(lines, statsLine, wearRaw) {
+  function finalizeRun(lines, statsLine, wearRaw, doneResult) {
     var okCount = 0, failCount = 0;
     els.output.innerHTML = "";
     lines.forEach(function (ln) {
@@ -534,11 +537,18 @@
       appendOut(els.output, ln.level, ln.text);
     });
 
+    // 优先使用后端 done 事件返回的汇总（更可靠），否则用日志行统计兜底
+    okCount = doneResult && typeof doneResult.ok_count === "number"
+              ? doneResult.ok_count : okCount;
+    failCount = doneResult && typeof doneResult.fail_count === "number"
+              ? doneResult.fail_count : failCount;
+
     var ok = failCount === 0;
     els.summary.classList.remove("hidden");
     els.statOk.textContent = okCount;
     els.statFail.textContent = failCount;
-    els.statTime.textContent = "?";
+    els.statTime.textContent = (doneResult && typeof doneResult.elapsed_ms === "number")
+      ? doneResult.elapsed_ms + " ms" : "?";
     els.verdict.className = "verdict " + (ok ? "ok" : "fail");
     els.verdict.textContent = ok ? "✓ 全部通过" : "✗ 存在失败";
     setPill(ok ? "ok" : "fail", ok ? "通过" : "失败");

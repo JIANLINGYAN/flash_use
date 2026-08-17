@@ -400,11 +400,12 @@ def run_framework(fid, config=None, test_config=None):
     os.makedirs(workdir, exist_ok=True)
 
     tmp_exe = os.path.join(tempfile.gettempdir(), "flash_use_%s_test" % fid)
-    cmd = [gcc, "-std=c99", "-Wall", "-Wextra"] + inc_flags + \
+    cmd = [gcc, "-std=c99", "-Wall", "-Wextra",
+           "-D__USE_MINGW_ANSI_STDIO=1"] + inc_flags + \
           ["-o", tmp_exe] + src_paths
 
     try:
-        build = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        build = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
     except subprocess.TimeoutExpired:
         return {"success": False, "error": "编译超时", "lines": []}
 
@@ -416,7 +417,7 @@ def run_framework(fid, config=None, test_config=None):
     try:
         t0 = time.time()
         run = subprocess.run([tmp_exe], cwd=workdir, env=_build_env(config, test_config),
-                             capture_output=True, text=True, timeout=120)
+                             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
         elapsed = time.time() - t0
     except subprocess.TimeoutExpired:
         return {"success": False, "error": "运行超时", "lines": []}
@@ -447,10 +448,11 @@ def _compile_exe(sources, includes, fid):
         return None, None
     inc_flags = ["-I" + os.path.join(ROOT, d) for d in includes]
     tmp_exe = os.path.join(tempfile.gettempdir(), "flash_use_%s_test" % fid)
-    cmd = [gcc, "-std=c99", "-Wall", "-Wextra"] + inc_flags + \
+    cmd = [gcc, "-std=c99", "-Wall", "-Wextra",
+           "-D__USE_MINGW_ANSI_STDIO=1"] + inc_flags + \
           ["-o", tmp_exe] + sources
     try:
-        build = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        build = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
     except subprocess.TimeoutExpired:
         return None, None
     return tmp_exe, build
@@ -469,52 +471,82 @@ def _classify_line(line):
 
 
 def _stream_run(exe, workdir, env, fid):
-    """以 Popen 实时读取运行输出，逐行 yield 日志事件；结束 yield done 事件。"""
-    import select
+    """跨平台实时读取子进程输出（Windows / WSL / Linux 兼容）。
+
+    不使用 select（Windows 上 select 不支持管道），改用后台线程读取
+    子进程的 stdout/stderr 并放入队列，主循环通过 proc.poll() 判断结束。
+    """
+    import threading
+    import queue
+
     try:
         t0 = time.time()
         proc = subprocess.Popen([exe], cwd=workdir, env=env,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                 text=True, bufsize=1)
+                                 text=True, encoding="utf-8", errors="replace")
     except OSError as e:
         yield {"event": "log", "level": "stderr", "text": "启动失败: %s" % e}
         yield {"event": "done", "result": {"success": False,
                                            "error": "启动失败: %s" % e, "lines": []}}
         return
 
-    stderr_buf = []
-    have_sel = hasattr(select, "select")
-    while True:
-        if have_sel:
-            rlist, _, _ = select.select([proc.stdout, proc.stderr], [], [], 0.1)
-        else:
-            rlist = [proc.stdout]
-        if proc.stdout in rlist:
-            line = proc.stdout.readline()
-            if line != "":
-                line = line.rstrip("\n")
-                yield {"event": "log", "level": _classify_line(line),
-                       "text": line}
-                time.sleep(0.015)  # 小幅节流，避免 UI 高频重绘
-        if proc.stderr in rlist:
-            el = proc.stderr.readline()
-            if el != "":
-                stderr_buf.append(el.rstrip("\n"))
-        if proc.poll() is not None:
-            for line in proc.stdout:
-                yield {"event": "log", "level": _classify_line(line.rstrip("\n")),
-                       "text": line.rstrip("\n")}
+    out_q = queue.Queue()
+    err_q = queue.Queue()
+
+    def _reader(stream, q):
+        try:
+            for line in iter(stream.readline, ""):
+                q.put(line)
+        except Exception:
+            pass
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+    t_out = threading.Thread(target=_reader, args=(proc.stdout, out_q), daemon=True)
+    t_err = threading.Thread(target=_reader, args=(proc.stderr, err_q), daemon=True)
+    t_out.start()
+    t_err.start()
+
+    def drain_out(throttle=True):
+        while not out_q.empty():
+            line = out_q.get().rstrip("\n")
+            out_text.append(line + "\n")
+            yield {"event": "log", "level": _classify_line(line), "text": line}
+            if throttle:
                 time.sleep(0.015)
-            break
+
+    stderr_buf = []
+    out_text = []
+    # 主循环：在子进程运行期间持续从队列取输出，避免忙等也不阻塞
+    while proc.poll() is None:
+        for ev in drain_out():
+            yield ev
+        while not err_q.empty():
+            stderr_buf.append(err_q.get().rstrip("\n"))
+        time.sleep(0.02)
+
+    # 子进程已结束，把残留输出全部取出
+    for ev in drain_out(throttle=False):
+        yield ev
+    while not err_q.empty():
+        stderr_buf.append(err_q.get().rstrip("\n"))
+    t_out.join(timeout=1)
+    t_err.join(timeout=1)
+
     for el in stderr_buf:
         yield {"event": "log", "level": "stderr", "text": el}
 
+    # 汇总完整输出并解析出统计/磨损图等结构化结果
+    raw = "".join(out_text)
+    parsed = parse_output(raw if raw else None)
+    parsed["return_code"] = proc.returncode
+    parsed["success"] = proc.returncode == 0
     elapsed = time.time() - t0
-    yield {"event": "done", "result": {
-        "success": proc.returncode == 0,
-        "return_code": proc.returncode,
-        "elapsed_ms": int(elapsed * 1000),
-    }}
+    parsed["elapsed_ms"] = int(elapsed * 1000)
+    yield {"event": "done", "result": parsed}
 
 
 def run_framework_stream(fid, config=None, test_config=None):
@@ -607,7 +639,7 @@ def _run_imported(fid, manifest, config=None, test_config=None):
            "-I" + os.path.join(ROOT, "simulator"), "-I" + dest,
            "-o", tmp_exe] + compile_srcs
 
-    build = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    build = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
     if build.returncode != 0:
         return {"success": False, "error": "编译失败",
                 "lines": [{"level": "fail", "text": l}
@@ -616,7 +648,7 @@ def _run_imported(fid, manifest, config=None, test_config=None):
     try:
         t0 = time.time()
         run = subprocess.run([tmp_exe], cwd=dest, env=_build_env(config, test_config),
-                             capture_output=True, text=True, timeout=120)
+                             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
         elapsed = time.time() - t0
     except subprocess.TimeoutExpired:
         return {"success": False, "error": "运行超时", "lines": []}
