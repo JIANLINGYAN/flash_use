@@ -142,7 +142,117 @@ FRAMEWORKS = [
             {"id": "func", "label": "功能压测(条目表)"},
         ],
     },
-    # 后续框架（fs / baremetal / ota）在此追加注册即可被前端发现
+    {
+        "id": "easyflash",
+        "name": "EasyFlash (ENV/KV 开源组件)",
+        "desc": "成熟开源 KV 框架（armink/EasyFlash V4.x NG 模式）：内置磨损均衡、"
+                "掉电保护（状态表多阶段提交）与垃圾回收。通过 ef_port 适配本平台"
+                "模拟基座，可独立导出使用。",
+        "sources": [
+            "simulator/flash_sim.c",
+            "frameworks/easyflash/ef_port.c",
+            "frameworks/easyflash/vendor/src/ef_env.c",
+            "frameworks/easyflash/vendor/src/ef_utils.c",
+            "frameworks/easyflash/vendor/src/easyflash.c",
+            "frameworks/easyflash/test/main_easyflash.c",
+        ],
+        "includes": [
+            "simulator",
+            "frameworks/easyflash",
+            "frameworks/easyflash/vendor/inc",
+        ],
+        "workdir": "frameworks/easyflash/test",
+        "config_schema": SIM_CONFIG_SCHEMA,
+        "test_schema": [
+            {"key": "capacity", "label": "ENV 区容量(字节)", "type": "number",
+             "default": 8192, "min": 2048, "step": 1024, "group": "test"},
+            {"key": "rounds", "label": "功能压测轮数", "type": "number",
+             "default": 20, "min": 1, "step": 1, "group": "test"},
+        ],
+        "test_items": [
+            {"id": "write_read", "label": "基础写入/读取"},
+            {"id": "update", "label": "更新覆盖"},
+            {"id": "delete", "label": "删除"},
+            {"id": "powerloss", "label": "掉电安全"},
+            {"id": "gc", "label": "垃圾回收"},
+            {"id": "types", "label": "多类型数据"},
+            {"id": "func", "label": "功能压测(条目表)"},
+        ],
+    },
+    {
+        "id": "flashdb",
+        "name": "FlashDB (KVDB 开源组件)",
+        "desc": "EasyFlash 作者的下一代作品（armink/FlashDB），KVDB 同样具备磨损均衡、"
+                "掉电保护与垃圾回收，并支持 blob 接口。通过 FAL 移植层对接模拟基座。",
+        "sources": [
+            "simulator/flash_sim.c",
+            "frameworks/flashdb/fal_flash_sim_port.c",
+            "frameworks/flashdb/vendor/src/fdb.c",
+            "frameworks/flashdb/vendor/src/fdb_utils.c",
+            "frameworks/flashdb/vendor/src/fdb_kvdb.c",
+            "frameworks/flashdb/vendor/src/fdb_tsdb.c",
+            "frameworks/flashdb/vendor/src/fdb_file.c",
+            "frameworks/flashdb/vendor/fal/src/fal.c",
+            "frameworks/flashdb/vendor/fal/src/fal_flash.c",
+            "frameworks/flashdb/vendor/fal/src/fal_partition.c",
+            "frameworks/flashdb/test/main_flashdb.c",
+        ],
+        "includes": [
+            "simulator",
+            "frameworks/flashdb",
+            "frameworks/flashdb/vendor/inc",
+            "frameworks/flashdb/vendor/fal/inc",
+        ],
+        "workdir": "frameworks/flashdb/test",
+        "config_schema": SIM_CONFIG_SCHEMA,
+        "test_schema": [
+            {"key": "capacity", "label": "KVDB 分区容量(字节)", "type": "number",
+             "default": 8192, "min": 2048, "step": 1024, "group": "test"},
+            {"key": "rounds", "label": "功能压测轮数", "type": "number",
+             "default": 20, "min": 1, "step": 1, "group": "test"},
+        ],
+        "test_items": [
+            {"id": "write_read", "label": "基础写入/读取"},
+            {"id": "update", "label": "更新覆盖"},
+            {"id": "delete", "label": "删除"},
+            {"id": "powerloss", "label": "掉电安全"},
+            {"id": "gc", "label": "垃圾回收"},
+            {"id": "types", "label": "多类型数据"},
+            {"id": "iterate", "label": "遍历迭代"},
+            {"id": "func", "label": "功能压测(条目表)"},
+        ],
+    },
+    {
+        "id": "baremetal",
+        "name": "裸机结构体配置 (A/B 双备份 + CRC)",
+        "desc": "最简单的裸机架构：把业务结构体整块映射到 Flash，A/B 双分区交替备份，"
+                "CRC32 校验 + 单调序号掉电恢复，无需序列化。附带磨损统计。",
+        "sources": [
+            "simulator/flash_sim.c",
+            "frameworks/baremetal/bm_config.c",
+            "frameworks/baremetal/test/main_baremetal.c",
+        ],
+        "includes": [
+            "simulator",
+            "frameworks/baremetal",
+        ],
+        "workdir": "frameworks/baremetal/test",
+        "config_schema": SIM_CONFIG_SCHEMA,
+        "test_schema": [
+            {"key": "rounds", "label": "func 压测保存次数", "type": "number",
+             "default": 200, "min": 1, "step": 1, "group": "test"},
+        ],
+        "test_items": [
+            {"id": "write_read", "label": "结构体保存/读取"},
+            {"id": "update", "label": "多次更新读最新"},
+            {"id": "ab_rotate", "label": "A/B 分区交替"},
+            {"id": "powerloss", "label": "掉电回退恢复"},
+            {"id": "corrupt", "label": "坏块自动恢复"},
+            {"id": "factory", "label": "恢复出厂"},
+            {"id": "func", "label": "高频保存压测"},
+        ],
+    },
+    # 后续框架（fs / ota）在此追加注册即可被前端发现
 ]
 
 
@@ -292,12 +402,20 @@ def _run_imported(fid, manifest, config=None, test_config=None):
     entry = manifest.get("entry", "test_main.c")
     sim_c = os.path.join(ROOT, "simulator", "flash_sim.c")
     entry_src = os.path.join(dest, entry)
-    lib_c = os.path.join(dest, manifest.get("lib", "") + ".c") \
-        if manifest.get("lib") else None
 
     compile_srcs = [sim_c, entry_src]
-    if lib_c and os.path.exists(lib_c):
-        compile_srcs.append(lib_c)
+    # 兼容旧导出包（单一 lib 文件）与新导出包（lib_sources 列表）
+    lib_sources = manifest.get("lib_sources")
+    if lib_sources:
+        for ls in lib_sources:
+            p = os.path.join(dest, ls)
+            if os.path.exists(p):
+                compile_srcs.append(p)
+    else:
+        lib_c = os.path.join(dest, manifest.get("lib", "") + ".c") \
+            if manifest.get("lib") else None
+        if lib_c and os.path.exists(lib_c):
+            compile_srcs.append(lib_c)
 
     tmp_exe = os.path.join(tempfile.gettempdir(), "flash_use_import_%s" % fid)
     cmd = [gcc, "-std=c99", "-Wall", "-Wextra",

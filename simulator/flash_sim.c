@@ -202,11 +202,20 @@ flash_err_t flash_sim_write(flash_dev_t *dev, uint32_t offset,
     if (dev->cfg.type == FLASH_TYPE_EEPROM) {
         memcpy(dev->image + offset, src, len);
     } else {
-        for (uint32_t i = 0; i < len; i++) {
-            if ((dev->image[offset + i] & src[i]) != src[i]) {
-                return FLASH_ERR_WRITE;
-            }
-        }
+        /*
+         * NOR/NAND 编程语义：写入是"按位与"（浮栅只能由 1 编程为 0），
+         * 因此源数据中为 1 的位表示"保持该位当前状态"，不构成非法写入；
+         * 只有当源数据某位为 0 而目标已为 0 时也是允许的（重复编程为 0）。
+         *
+         * 真正非法的情况是"试图把已经是 0 的位擦回 1"，但按位与永远不会
+         * 产生该效果——它只可能让位保持或变 0。故写入本身始终可执行，
+         * 不需要预检查；是否"看起来像写失败"由上层通过回读比对判断。
+         *
+         * 说明（重要）：此前实现要求 (image & src) == src，即禁止在已写过
+         * (含 0 位) 的区域写入含 1 位的数据。这与真实 NOR 不符——成熟框架
+         * （如 EasyFlash / FlashDB）会在已写区域上覆写包含 0xFF 填充位或
+         * 未变更状态位的结构体，属于合法操作，却会被误判为 FLASH_ERR_WRITE。
+         */
         for (uint32_t i = 0; i < len; i++) {
             dev->image[offset + i] &= src[i];
         }

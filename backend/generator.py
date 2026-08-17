@@ -40,6 +40,71 @@ RECIPES = {
         "copy_files": ["flash_sim.c", "flash_sim.h"],
         "desc": "Flash 物理特性模拟库，提供统一 read/write/erase 接口。",
     },
+    "easyflash": {
+        "lib_name": "easyflash",
+        "title": "EasyFlash (ENV/KV 开源组件)",
+        "desc": "成熟开源 KV 框架，内置磨损均衡、掉电保护与垃圾回收。",
+        "src_dir": "frameworks/easyflash",
+        # 需要打进导出包的源文件（相对 ROOT）
+        "copy_files": [
+            "frameworks/easyflash/ef_port.c",
+            "frameworks/easyflash/ef_port.h",
+            "frameworks/easyflash/ef_cfg.h",
+            "frameworks/easyflash/vendor/src/ef_env.c",
+            "frameworks/easyflash/vendor/src/ef_utils.c",
+            "frameworks/easyflash/vendor/src/easyflash.c",
+            "frameworks/easyflash/vendor/inc/easyflash.h",
+            "frameworks/easyflash/vendor/inc/ef_def.h",
+        ],
+        # 自检入口（保留框架自带 main，重命名为 test_main.c）
+        "test_entry": "frameworks/easyflash/test/main_easyflash.c",
+        "extra_includes": ["frameworks/easyflash/vendor/inc"],
+        "requires": "flash_sim",
+    },
+    "flashdb": {
+        "lib_name": "flashdb",
+        "title": "FlashDB (KVDB 开源组件)",
+        "desc": "EasyFlash 作者的下一代 KV 框架，具备磨损均衡、掉电保护与 GC。",
+        "src_dir": "frameworks/flashdb",
+        "copy_files": [
+            "frameworks/flashdb/fal_flash_sim_port.c",
+            "frameworks/flashdb/fal_flash_sim_port.h",
+            "frameworks/flashdb/fdb_cfg.h",
+            "frameworks/flashdb/fal_cfg.h",
+            "frameworks/flashdb/vendor/src/fdb.c",
+            "frameworks/flashdb/vendor/src/fdb_utils.c",
+            "frameworks/flashdb/vendor/src/fdb_kvdb.c",
+            "frameworks/flashdb/vendor/src/fdb_tsdb.c",
+            "frameworks/flashdb/vendor/src/fdb_file.c",
+            "frameworks/flashdb/vendor/inc/flashdb.h",
+            "frameworks/flashdb/vendor/inc/fdb_def.h",
+            "frameworks/flashdb/vendor/inc/fdb_low_lvl.h",
+            "frameworks/flashdb/vendor/fal/src/fal.c",
+            "frameworks/flashdb/vendor/fal/src/fal_flash.c",
+            "frameworks/flashdb/vendor/fal/src/fal_partition.c",
+            "frameworks/flashdb/vendor/fal/inc/fal.h",
+            "frameworks/flashdb/vendor/fal/inc/fal_def.h",
+        ],
+        "test_entry": "frameworks/flashdb/test/main_flashdb.c",
+        "extra_includes": [
+            "frameworks/flashdb/vendor/inc",
+            "frameworks/flashdb/vendor/fal/inc",
+        ],
+        "requires": "flash_sim",
+    },
+    "baremetal": {
+        "lib_name": "bm_config",
+        "title": "裸机结构体配置 (A/B 双备份 + CRC)",
+        "desc": "最简单的裸机架构：结构体整块映射，A/B 双备份 + CRC32 + 单调序号掉电恢复。",
+        "src_dir": "frameworks/baremetal",
+        "copy_files": [
+            "frameworks/baremetal/bm_config.c",
+            "frameworks/baremetal/bm_config.h",
+        ],
+        "test_entry": "frameworks/baremetal/test/main_baremetal.c",
+        "extra_includes": [],
+        "requires": "flash_sim",
+    },
 }
 
 
@@ -135,71 +200,124 @@ def _render_test_main(fw_id, recipe, params):
 def _render_porting_md(fw_id, recipe, params):
     """生成移植说明文档。"""
     lib = recipe["lib_name"]
+    files = "\n".join("- `%s`" % os.path.basename(fn)
+                      for fn in recipe["copy_files"])
+    if fw_id == "kv":
+        body = (
+            "## 移植步骤\n\n"
+            "1. 将 `%s.c` / `%s.h` 加入你的工程（无需 RTOS 依赖）。\n"
+            "2. 实现底层 Flash 驱动，并暴露与 `flash_sim.h` **相同签名**的接口：\n"
+            "   `flash_sim_init / flash_sim_read / flash_sim_write / flash_sim_erase / flash_sim_deinit`。\n"
+            "3. 把 `%s.h` 中的 `#include \"flash_sim.h\"` 指向你的驱动头，或保留\n"
+            "   `flash_sim` 实现直接对接硬件。\n"
+            "4. 调用 `kv_init / kv_write / kv_read / kv_delete` 即可使用。\n\n"
+            "## 掉电安全说明\n\n"
+            "写入采用两步提交（先写数据、再写状态字 COMMITTED），中途掉电的记录\n"
+            "在 `kv_init` 加载时会被丢弃，保证数据一致性。\n"
+        ) % (lib, lib, lib)
+        cfg_text = (
+            "## 配置参数（本次导出）\n\n"
+            "- capacity: %s 字节\n"
+            "- page_size: %s 字节\n"
+            "- erase_size: %s 字节\n\n"
+        ) % (params.get("capacity", 8192), params.get("page_size", 256),
+             params.get("erase_size", 4096))
+    else:
+        api_hint = {
+            "easyflash": "调用 `easyflash_init()` 后使用 `ef_set_env / ef_get_env` 访问 KV。",
+            "flashdb": "调用 `fdb_kvdb_init()` 后使用 `fdb_kv_set / fdb_kv_get` 访问 KV。",
+            "baremetal": "调用 `bm_config_init()` 后使用 `bm_config_save / bm_config_load` 保存结构体。",
+        }.get(fw_id, "参考框架自带头文件 API。")
+        body = (
+            "## 移植步骤\n\n"
+            "1. 将本包内所有 `.c` / `.h` 加入你的工程。\n"
+            "2. 实现底层 Flash 驱动，并暴露与 `flash_sim.h` **相同签名**的接口：\n"
+            "   `flash_sim_init / flash_sim_read / flash_sim_write / flash_sim_erase / flash_sim_deinit`。\n"
+            "3. 框架内部已 `#include \"flash_sim.h\"`，将 `flash_sim` 实现替换为你的\n"
+            "   真实驱动即可（或保留 `flash_sim` 直接对接硬件）。\n"
+            "4. %s\n\n"
+            "## 掉电安全说明\n\n"
+            "本框架在模拟基座上已通过掉电残留/回退测试（见 `test_main.c` 输出）。\n"
+            "正式移植后建议同样在目标硬件上做一次掉电验证。\n"
+        ) % api_hint
+        cfg_text = (
+            "## 配置参数（本次导出）\n\n"
+            "- erase_size: %s 字节\n\n"
+        ) % params.get("erase_size", 4096)
     return (
         "# %s 移植说明\n\n"
         "本包由 Flash 存储仿真平台「代码生成引擎」导出，包含可直接移植到\n"
         "嵌入式目标的库文件。\n\n"
         "## 文件清单\n\n"
-        "- `%s.c` / `%s.h`：存储框架实现（核心库，平台无关）\n"
+        "%s\n"
         "- `test_main.c`：基于模拟基座的自检示例（仅 PC 仿真用，可删除）\n"
         "- `manifest.json`：包元信息（导入平台时使用）\n\n"
-        "## 移植步骤\n\n"
-        "1. 将 `%s.c` / `%s.h` 加入你的工程（无需 RTOS 依赖）。\n"
-        "2. 实现底层 Flash 驱动，并暴露与 `flash_sim.h` **相同签名**的接口：\n"
-        "   `flash_sim_init / flash_sim_read / flash_sim_write / flash_sim_erase / flash_sim_deinit`。\n"
-        "3. 把 `%s.h` 中的 `#include \"flash_sim.h\"` 指向你的驱动头，或保留\n"
-        "   `flash_sim` 实现直接对接硬件。\n"
-        "4. 调用 `kv_init / kv_write / kv_read / kv_delete` 即可使用。\n\n"
-        "## 配置参数（本次导出）\n\n"
-        "- capacity: %s 字节\n"
-        "- page_size: %s 字节\n"
-        "- erase_size: %s 字节\n\n"
-        "## 掉电安全说明\n\n"
-        "写入采用两步提交（先写数据、再写状态字 COMMITTED），中途掉电的记录\n"
-        "在 `kv_init` 加载时会被丢弃，保证数据一致性。\n"
-    ) % (recipe["title"], lib, lib, lib, lib, lib,
-         params.get("capacity", 8192), params.get("page_size", 256),
-         params.get("erase_size", 4096))
+        "%s"
+        "%s"
+    ) % (recipe["title"], files, body, cfg_text)
 
 
 def generate_zip(fw_id, params):
     """生成库文件 zip 包，返回 (zip_bytes, manifest_dict)。
 
     失败时抛出 RuntimeError，message 描述原因。
+
+    说明：
+      - kv/simulator 两个基础框架使用"复制源码 + 自动生成 test_main.c"方式。
+      - easyflash/flashdb/baremetal 三个框架源码文件较多且自带 main 测试，
+        采用"整目录相对 ROOT 复制 + 保留框架自带 main 作为 test_main.c"方式，
+        以保证导出的包与模拟基座验证时完全一致（可独立编译运行）。
     """
     recipe = RECIPES.get(fw_id)
     if not recipe:
         raise RuntimeError("不支持生成的框架: %s" % fw_id)
 
-    src_dir = os.path.join(ROOT, recipe["src_dir"])
-    if not os.path.isdir(src_dir):
-        raise RuntimeError("框架源目录缺失: %s" % src_dir)
-
     lib = recipe["lib_name"]
     ts = int(time.time())
+    lib_sources = []  # 仅 .c，运行时需与 flash_sim.c 一起编译
     manifest = {
         "id": "%s_export_%d" % (fw_id, ts),
         "name": "%s（导出库）" % recipe["title"],
         "desc": recipe["desc"],
         "base": fw_id,
-        "requires": "flash_sim",           # 标记依赖模拟基座接口（导入校验依据）
+        "requires": recipe.get("requires", "flash_sim"),
         "params": params,
-        "sources": recipe["copy_files"] + ["test_main.c"],
-        "entry": "test_main.c",            # 编译运行入口
+        "entry": "test_main.c",
         "lib": lib,
+        "lib_sources": lib_sources,
     }
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         # 复制真实库源码
+        copied = []
         for fn in recipe["copy_files"]:
-            full = os.path.join(src_dir, fn)
+            full = os.path.join(ROOT, fn)
+            if not os.path.exists(full):
+                # 基础框架（kv/simulator）文件相对 src_dir
+                full = os.path.join(ROOT, recipe["src_dir"], fn)
             if not os.path.exists(full):
                 raise RuntimeError("源文件缺失: %s" % full)
-            with open(full, "rb") as f:
-                zf.writestr(fn, f.read())
-        # 生成配套文件
-        zf.writestr("test_main.c", _render_test_main(fw_id, recipe, params))
+            # 去掉 frameworks/... 前缀，扁平放进包内（避免深层目录）
+            arcname = os.path.basename(fn)
+            zf.writestr(arcname, open(full, "rb").read())
+            copied.append(arcname)
+            if fn.endswith(".c"):
+                lib_sources.append(arcname)
+
+        # 测试入口：基础框架自动生成，新框架保留自带 main
+        test_entry = recipe.get("test_entry")
+        if test_entry:
+            full = os.path.join(ROOT, test_entry)
+            if not os.path.exists(full):
+                raise RuntimeError("测试入口缺失: %s" % full)
+            zf.writestr("test_main.c", open(full, "rb").read())
+        else:
+            zf.writestr("test_main.c",
+                        _render_test_main(fw_id, recipe, params))
+        copied.append("test_main.c")
+
+        manifest["sources"] = copied
         zf.writestr("PORTING.md", _render_porting_md(fw_id, recipe, params))
         zf.writestr("manifest.json",
                     json.dumps(manifest, ensure_ascii=False, indent=2))

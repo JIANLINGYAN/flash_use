@@ -105,11 +105,33 @@ int main(void)
                    memcmp(wbuf, rbuf, sizeof(wbuf)) == 0 ? FLASH_OK : FLASH_ERR_IO,
                    FLASH_OK);
 
+    /*
+     * NOR 编程语义验证（按位与，只能 1->0）：
+     *  1) 未擦除区域写入全 0xFF：真实 NOR 上等价于"不改变任何位"，属合法操作，
+     *     且数据保持原值（不会被擦回 0xFF）。
+     *  2) 未擦除区域继续把某些位由 1 编程为 0：合法，结果为原值 & 新值。
+     * 注意：此处不再期望返回 FLASH_ERR_WRITE——旧断言把"写 0xFF"当作非法，
+     * 与真实 NOR 不符，也会导致 EasyFlash/FlashDB 等成熟框架无法正常工作。
+     */
     uint8_t ov[16];
     memset(ov, 0xFF, sizeof(ov));
-    fails += check("overwrite without erase (reject)",
-                   flash_sim_write(nor, 0, ov, sizeof(ov)),
-                   FLASH_ERR_WRITE);
+    fails += check("overwrite 0xFF (no-op, allowed)",
+                   flash_sim_write(nor, 0, ov, sizeof(ov)), FLASH_OK);
+    uint8_t chk[16];
+    flash_sim_read(nor, 0, chk, sizeof(chk));
+    fails += check("overwrite 0xFF keeps data",
+                   memcmp(chk, wbuf, sizeof(chk)) == 0 ? FLASH_OK : FLASH_ERR_IO,
+                   FLASH_OK);
+
+    uint8_t zero[16];
+    memset(zero, 0x00, sizeof(zero));
+    fails += check("program bits 1->0 (allowed)",
+                   flash_sim_write(nor, 0, zero, sizeof(zero)), FLASH_OK);
+    flash_sim_read(nor, 0, chk, sizeof(chk));
+    uint8_t allzero = 0;
+    for (size_t i = 0; i < sizeof(chk); i++) { allzero |= chk[i]; }
+    fails += check("bits become 0x00",
+                   allzero == 0 ? FLASH_OK : FLASH_ERR_IO, FLASH_OK);
 
     printf("  [info] 性能与磨损统计：\n");
     dump_stats(nor, cfg.erase_cycles);
