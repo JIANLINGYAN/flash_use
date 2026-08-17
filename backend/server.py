@@ -69,6 +69,14 @@ SIM_ENV_MAP = {
     "bad_blocks": "SIM_BAD_N",
     "bad_ratio": "SIM_BAD_R",
 }
+# 视为"未配置、跳过注入"的值。仅作用于数值字段，避免把 schema 中的
+# 0 占位默认（"按类型默认"）注入环境变量后被 C 程序当成合法值覆盖兜底。
+# type 字段独立于本集合，始终注入。
+_SIM_SKIP_IF_ZERO = {
+    "total", "erase_size", "write_size", "erase_cycles",
+    "read_us", "write_us", "erase_us",
+    "bad_blocks", "bad_ratio",
+}
 # KV 测试可配置项 -> 环境变量名
 KV_ENV_MAP = {
     "capacity": "KV_CAPACITY",
@@ -78,32 +86,55 @@ KV_ENV_MAP = {
 }
 
 # 配置项 schema（前端渲染表单用）：group 区分"模拟基座"与"测试"
-# 注意：容量/擦除块/寿命/耗时等字段 default=0 表示"不显式覆盖"，
-# 由模拟基座按介质类型套用硬件特性表默认物理指标
-# （见 flash_sim.h FLASH_CFG_DEFAULTS_BY_TYPE）。这样 NOR/NAND/EEPROM
-# 在未配置时各自获得正确的默认容量、擦除代价与寿命。
+# 数值字段的 default 是该字段在"默认类型(NOR)"下的硬件合理值，
+# 便于用户开箱即用。type 切换时由前端按 SIM_TYPE_DEFAULTS 刷新
+# 其他字段的当前值。
+# 后端 _build_env 注入时，对 0 值视为"按类型默认"（不注入到 C 程序环境），
+# 让 C 程序走自身兜底或模拟器 FLASH_CFG_DEFAULTS_BY_TYPE。
+SIM_TYPE_DEFAULTS = {
+    # key            NOR                      NAND                       EEPROM
+    "total":         (64 * 1024,             128 * 1024 * 1024,           32 * 1024),
+    "erase_size":    (4 * 1024,              128 * 1024,                  0),         # EEPROM 无擦除
+    "write_size":    (1,                     1,                            1),
+    "erase_cycles":  (100000,                100000,                       1000000),
+    "read_us":       (50,                    100,                          50),
+    "write_us":      (200,                   500,                          500),
+    "erase_us":      (40000,                 3000,                         0),         # EEPROM 无擦除
+    "bad_blocks":    (0,                     0,                            0),
+    "bad_ratio":     (0,                     0,                            0),
+}
+
 SIM_CONFIG_SCHEMA = [
     {"key": "type", "label": "存储介质类型", "type": "select",
      "options": [["0", "NOR"], ["1", "NAND"], ["2", "EEPROM"]], "default": "0",
      "group": "simulator"},
-    {"key": "total", "label": "总容量(字节,0=按类型默认)", "type": "number",
-     "default": 0, "min": 0, "step": 1024, "group": "simulator"},
-    {"key": "erase_size", "label": "擦除块大小(字节,0=按类型默认)", "type": "number",
-     "default": 0, "min": 0, "step": 256, "group": "simulator"},
+    {"key": "total", "label": "总容量(字节)", "type": "number",
+     "default": SIM_TYPE_DEFAULTS["total"][0], "min": 0, "step": 1024,
+     "group": "simulator"},
+    {"key": "erase_size", "label": "擦除块大小(字节)", "type": "number",
+     "default": SIM_TYPE_DEFAULTS["erase_size"][0], "min": 0, "step": 256,
+     "group": "simulator"},
     {"key": "write_size", "label": "最小写入单位(字节)", "type": "number",
-     "default": 1, "min": 1, "step": 1, "group": "simulator"},
-    {"key": "erase_cycles", "label": "标称擦写寿命(次,0=按类型默认)", "type": "number",
-     "default": 0, "min": 0, "step": 1000, "group": "simulator"},
-    {"key": "read_us", "label": "读耗时(us/次,0=按类型默认)", "type": "number",
-     "default": 0, "min": 0, "step": 1, "group": "simulator"},
-    {"key": "write_us", "label": "写耗时(us/次,0=按类型默认)", "type": "number",
-     "default": 0, "min": 0, "step": 1, "group": "simulator"},
-    {"key": "erase_us", "label": "擦除耗时(us/次,0=按类型默认)", "type": "number",
-     "default": 0, "min": 0, "step": 1, "group": "simulator"},
+     "default": SIM_TYPE_DEFAULTS["write_size"][0], "min": 1, "step": 1,
+     "group": "simulator"},
+    {"key": "erase_cycles", "label": "标称擦写寿命(次)", "type": "number",
+     "default": SIM_TYPE_DEFAULTS["erase_cycles"][0], "min": 0, "step": 1000,
+     "group": "simulator"},
+    {"key": "read_us", "label": "读耗时(us/次)", "type": "number",
+     "default": SIM_TYPE_DEFAULTS["read_us"][0], "min": 0, "step": 1,
+     "group": "simulator"},
+    {"key": "write_us", "label": "写耗时(us/次)", "type": "number",
+     "default": SIM_TYPE_DEFAULTS["write_us"][0], "min": 0, "step": 1,
+     "group": "simulator"},
+    {"key": "erase_us", "label": "擦除耗时(us/次)", "type": "number",
+     "default": SIM_TYPE_DEFAULTS["erase_us"][0], "min": 0, "step": 1,
+     "group": "simulator"},
     {"key": "bad_blocks", "label": "固定坏块数量", "type": "number",
-     "default": 0, "min": 0, "step": 1, "group": "simulator"},
+     "default": SIM_TYPE_DEFAULTS["bad_blocks"][0], "min": 0, "step": 1,
+     "group": "simulator"},
     {"key": "bad_ratio", "label": "运行时坏块比率(万分之)", "type": "number",
-     "default": 0, "min": 0, "max": 10000, "step": 1, "group": "simulator"},
+     "default": SIM_TYPE_DEFAULTS["bad_ratio"][0], "min": 0, "max": 10000,
+     "step": 1, "group": "simulator"},
 ]
 
 FRAMEWORKS = [
@@ -310,12 +341,20 @@ def parse_output(text):
 
 
 def _build_env(config, test_config):
-    """根据前端传入的配置构造测试程序的环境变量（注入 SIM_*/KV_*）。"""
+    """根据前端传入的配置构造测试程序的环境变量（注入 SIM_*/KV_*）。
+
+    数值字段在 schema 默认值=0（"按类型默认"）时不注入环境变量，
+    避免被 C 程序当成合法值（如 SIM_TOTAL=0）覆盖自身兜底默认。
+    """
     env = dict(os.environ)
     if config:
         for k, envk in SIM_ENV_MAP.items():
             if k in config and config[k] != "":
-                env[envk] = str(config[k])
+                v = config[k]
+                if k in _SIM_SKIP_IF_ZERO and str(v) == "0":
+                    # 视为未配置，让 C 程序走兜底默认（或模拟器 FLASH_CFG_DEFAULTS_BY_TYPE）
+                    continue
+                env[envk] = str(v)
     if test_config:
         for k, envk in KV_ENV_MAP.items():
             if k not in test_config or test_config[k] == "":
@@ -512,7 +551,15 @@ class Handler(BaseHTTPRequestHandler):
                 for f in FRAMEWORKS
             ]
             imported = importer.imported_frameworks()
-            self._send_json({"frameworks": builtin + imported})
+            # 把"按类型默认"映射一并返回，前端在切换 type 时用其刷新
+            # 其他字段的当前值。
+            defaults = {
+                k: {"0": v[0], "1": v[1], "2": v[2]}
+                for k, v in SIM_TYPE_DEFAULTS.items()
+            }
+            self._send_json(
+                {"frameworks": builtin + imported, "sim_type_defaults": defaults}
+            )
         else:
             self.send_error(404, "Not Found")
 

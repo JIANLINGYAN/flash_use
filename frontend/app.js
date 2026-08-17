@@ -58,15 +58,42 @@
     return fetch(path, opts).then(function (r) { return r.json(); });
   }
 
+  // 按介质类型（NOR/NAND/EEPROM）刷新的模拟基座字段默认值映射，
+  // 由后端 /api/frameworks 返回，避免前端硬编码。
+  var simTypeDefaults = {};
+
   function loadFrameworks() {
     els.list.innerHTML = '<p class="hint">正在加载框架列表…</p>';
     api("GET", "/api/frameworks").then(function (data) {
       frameworks = data.frameworks || [];
+      simTypeDefaults = data.sim_type_defaults || {};
       renderList();
       renderGenSelect();
       if (frameworks.length > 0 && !selectedId) select(frameworks[0].id);
     }).catch(function (e) {
       els.list.innerHTML = '<p class="hint">加载失败：' + e + "</p>";
+    });
+  }
+
+  /*
+   * 根据当前选中的介质类型（type 字段）刷新同表单内其他模拟基座
+   * 字段的 value，使其匹配该类型的硬件特性表默认指标。
+   * 仅刷新 data-group=="sim" 且 key 在映射中、且 user_typed 标记未置位的字段，
+   * 避免覆盖用户已显式修改的值。
+   */
+  function applySimTypeDefaults(formRoot) {
+    if (!formRoot || !simTypeDefaults) return;
+    var typeEl = formRoot.querySelector('select[data-key="type"]');
+    if (!typeEl) return;
+    var t = String(typeEl.value);
+    var inputs = formRoot.querySelectorAll('input[data-group="sim"], select[data-group="sim"]');
+    inputs.forEach(function (inp) {
+      if (inp === typeEl) return;
+      var key = inp.dataset.key;
+      if (!key || inp.dataset.userTyped === "1") return;
+      var m = simTypeDefaults[key];
+      if (!m || m[t] == null) return;
+      inp.value = m[t];
     });
   }
 
@@ -118,6 +145,8 @@
     sim.innerHTML = '<div class="cfg-title">模拟基座配置</div>';
     (f.config_schema || []).forEach(function (p) { sim.appendChild(makeField(p, "sim")); });
     els.configArea.appendChild(sim);
+    // 首次渲染：若当前 type 不是 0，按类型应用默认硬件指标
+    applySimTypeDefaults(sim);
 
     // 测试配置（KV 含测试项与条目表）
     var tst = document.createElement("div");
@@ -149,6 +178,12 @@
         if (String(o[0]) === String(p.default)) opt.selected = true;
         input.appendChild(opt);
       });
+      // 介质类型 select：切换时刷新其他基座字段默认值
+      if (p.key === "type") {
+        input.addEventListener("change", function () {
+          applySimTypeDefaults(input.closest("#config-area") || input.parentNode.parentNode);
+        });
+      }
     } else {
       input = document.createElement("input");
       input.type = "number";
@@ -156,6 +191,12 @@
       if (p.min != null) input.min = p.min;
       if (p.max != null) input.max = p.max;
       if (p.step != null) input.step = p.step;
+      // 用户一旦手动改过，标记为"已显式配置"，避免后续 type 切换被覆盖
+      if (group === "sim") {
+        input.addEventListener("input", function () {
+          input.dataset.userTyped = "1";
+        });
+      }
     }
     input.dataset.key = p.key;
     input.dataset.group = group;
