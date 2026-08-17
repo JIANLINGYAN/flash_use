@@ -87,52 +87,115 @@
     return f ? f.name : id;
   }
 
-  // 动态渲染：模拟基座配置 + 测试配置
+  // ---- 配置区（右侧栏）：模拟基座配置 + 测试配置/测试项/条目表 ----
   function renderConfigForm() {
     var f = selectedFramework();
     els.configArea.innerHTML = "";
-    if (!f) return;
-    var groups = [
-      { title: "模拟基座配置", schema: f.config_schema || [] },
-      { title: "测试配置", schema: f.test_schema || [] },
-    ];
-    groups.forEach(function (g) {
-      if (!g.schema.length) return;
-      var box = document.createElement("div");
-      box.className = "cfg-group";
-      box.innerHTML = '<div class="cfg-title">' + g.title + "</div>";
-      g.schema.forEach(function (p) {
-        var row = document.createElement("label");
-        row.className = "cfg-row";
-        var label = document.createElement("span");
-        label.textContent = p.label;
-        var input;
-        if (p.type === "select") {
-          input = document.createElement("select");
-          (p.options || []).forEach(function (o) {
-            var opt = document.createElement("option");
-            opt.value = o[0]; opt.textContent = o[1];
-            if (String(o[0]) === String(p.default)) opt.selected = true;
-            input.appendChild(opt);
-          });
-        } else {
-          input = document.createElement("input");
-          input.type = "number";
-          input.value = p.default;
-          if (p.min != null) input.min = p.min;
-          if (p.max != null) input.max = p.max;
-          if (p.step != null) input.step = p.step;
-        }
-        input.dataset.key = p.key;
-        input.dataset.group = g.title;
-        row.appendChild(label);
-        row.appendChild(input);
-        box.appendChild(row);
+    if (!f) { els.configArea.innerHTML = '<p class="hint">请先在左侧选择一个框架。</p>'; return; }
+
+    // 模拟基座配置
+    var sim = document.createElement("div");
+    sim.className = "cfg-group";
+    sim.innerHTML = '<div class="cfg-title">模拟基座配置</div>';
+    (f.config_schema || []).forEach(function (p) { sim.appendChild(makeField(p, "sim")); });
+    els.configArea.appendChild(sim);
+
+    // 测试配置（KV 含测试项与条目表）
+    var tst = document.createElement("div");
+    tst.className = "cfg-group";
+    (f.test_schema || []).forEach(function (p) { tst.appendChild(makeField(p, "test")); });
+    if (f.test_items && f.test_items.length) {
+      tst.appendChild(makeTestItems(f.test_items));
+    }
+    if (f.id === "kv") {
+      tst.appendChild(makeItemTable());
+    }
+    if (tst.children.length > 1 || (f.test_schema && f.test_schema.length)) {
+      tst.insertAdjacentHTML("afterbegin", '<div class="cfg-title">测试配置</div>');
+      els.configArea.appendChild(tst);
+    }
+  }
+
+  function makeField(p, group) {
+    var row = document.createElement("label");
+    row.className = "cfg-row";
+    var label = document.createElement("span");
+    label.textContent = p.label;
+    var input;
+    if (p.type === "select") {
+      input = document.createElement("select");
+      (p.options || []).forEach(function (o) {
+        var opt = document.createElement("option");
+        opt.value = o[0]; opt.textContent = o[1];
+        if (String(o[0]) === String(p.default)) opt.selected = true;
+        input.appendChild(opt);
       });
-      els.configArea.appendChild(box);
+    } else {
+      input = document.createElement("input");
+      input.type = "number";
+      input.value = p.default;
+      if (p.min != null) input.min = p.min;
+      if (p.max != null) input.max = p.max;
+      if (p.step != null) input.step = p.step;
+    }
+    input.dataset.key = p.key;
+    input.dataset.group = group;
+    row.appendChild(label);
+    row.appendChild(input);
+    return row;
+  }
+
+  function makeTestItems(items) {
+    var box = document.createElement("div");
+    box.className = "checklist";
+    box.innerHTML = '<div class="cfg-subtitle">测试项（勾选执行）</div>';
+    items.forEach(function (it) {
+      var lbl = document.createElement("label");
+      lbl.className = "chk";
+      var cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.value = it.id;
+      cb.checked = true;
+      cb.dataset.testitem = "1";
+      lbl.appendChild(cb);
+      lbl.appendChild(document.createTextNode(" " + it.label));
+      box.appendChild(lbl);
     });
-    if (els.configArea.children.length) els.configArea.classList.remove("hidden");
-    else els.configArea.classList.add("hidden");
+    return box;
+  }
+
+  function makeItemTable() {
+    var box = document.createElement("div");
+    box.className = "item-table";
+    box.innerHTML = '<div class="cfg-subtitle">KV 模拟条目表（可累加多条）</div>';
+    var tbl = document.createElement("div");
+    tbl.className = "itable";
+    tbl.id = "item-table-body";
+    box.appendChild(tbl);
+    var add = document.createElement("button");
+    add.className = "btn btn-sm";
+    add.textContent = "+ 添加条目";
+    add.onclick = function () { addItemRow(tbl, null); };
+    box.appendChild(add);
+    // 默认一条
+    addItemRow(tbl, { vlen: 32, n: 50, freq: 50 });
+    return box;
+  }
+
+  function addItemRow(tbl, val) {
+    val = val || { vlen: 32, n: 50, freq: 50 };
+    var row = document.createElement("div");
+    row.className = "irow";
+    row.innerHTML =
+      '<span>长度</span><input type="number" class="i-vlen" value="' + val.vlen + '" min="1">' +
+      '<span>条数</span><input type="number" class="i-n" value="' + val.n + '" min="1">' +
+      '<span>修改%</span><input type="number" class="i-freq" value="' + val.freq + '" min="0" max="100">';
+    var del = document.createElement("button");
+    del.className = "btn btn-sm btn-del";
+    del.textContent = "✕";
+    del.onclick = function () { tbl.removeChild(row); };
+    row.appendChild(del);
+    tbl.appendChild(row);
   }
 
   function collectConfig() {
@@ -140,9 +203,28 @@
     els.configArea.querySelectorAll("input[data-key],select[data-key]").forEach(function (inp) {
       var v = inp.value;
       if (inp.type === "number") v = Number(v);
-      if (inp.dataset.group === "模拟基座配置") config[inp.dataset.key] = v;
+      if (inp.dataset.group === "sim") config[inp.dataset.key] = v;
       else test[inp.dataset.key] = v;
     });
+    // 测试项
+    var tests = [];
+    els.configArea.querySelectorAll("input[data-testitem]").forEach(function (cb) {
+      if (cb.checked) tests.push(cb.value);
+    });
+    if (tests.length) test.tests = tests;
+    // 条目表
+    var items = [];
+    var tbl = document.getElementById("item-table-body");
+    if (tbl) {
+      tbl.querySelectorAll(".irow").forEach(function (row) {
+        items.push({
+          vlen: Number(row.querySelector(".i-vlen").value),
+          n: Number(row.querySelector(".i-n").value),
+          freq: Number(row.querySelector(".i-freq").value),
+        });
+      });
+    }
+    if (items.length) test.items = items;
     return { config: config, test_config: test };
   }
 
@@ -163,10 +245,12 @@
   function renderPerfStats(stats) {
     if (!stats) { els.perfStats.classList.add("hidden"); return; }
     var items = [
+      ["模式", stats.mode],
       ["读次数", stats.reads != null ? stats.reads : stats.ops],
       ["写次数", stats.writes],
       ["擦除次数", stats.erases],
       ["写入字节", stats.write_bytes],
+      ["总操作数", stats.ops],
       ["数据丢失", stats.lost],
       ["阻塞耗时(us)", stats.block_us],
       ["读耗时(us)", stats.read_us],
@@ -197,18 +281,28 @@
     if (bw > 14) bw = 14;
     for (var i = 0; i < n; i++) {
       var v = wearmap[i];
-      var h = max > 0 ? (v / max) * (H - 20) : 0;
       var ratio = max > 0 ? v / max : 0;
-      // 热度配色：绿->黄->红
-      var r = Math.round(255 * Math.min(1, ratio * 1.6));
-      var g = Math.round(200 * (1 - ratio));
-      ctx.fillStyle = "rgb(" + r + "," + g + ",80)";
-      ctx.fillRect(i * bw, H - h - 16, bw - 1, h);
+      var hue = 120 - 120 * Math.min(1, ratio);
+      var light = 38 + 22 * (1 - Math.min(1, ratio));
+      ctx.fillStyle = "hsl(" + hue + ",75%," + light + "%)";
+      var h = Math.max(2, (v / max) * (H - 30));
+      ctx.fillRect(Math.round(i * bw), Math.round(H - h - 26), Math.ceil(bw - 1), Math.round(h));
+      ctx.fillStyle = "#5b6678";
+      ctx.font = "9px sans-serif";
+      if (bw >= 10) ctx.fillText(String(i), Math.round(i * bw), H - 16);
     }
+    var grad = ctx.createLinearGradient(0, 0, 160, 0);
+    grad.addColorStop(0, "hsl(120,75%,48%)");
+    grad.addColorStop(0.5, "hsl(60,75%,48%)");
+    grad.addColorStop(1, "hsl(0,75%,48%)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(6, H - 12, 160, 8);
     ctx.fillStyle = "#8b97ad";
     ctx.font = "11px sans-serif";
-    ctx.fillText("块数=" + n + "  最高擦写=" + max, 6, H - 4);
-    els.wearLegend.textContent = "柱越高表示该块擦写越频繁；颜色越红表示越接近寿命上限。";
+    ctx.fillText("低", 6, H - 16);
+    ctx.fillText("高", 150, H - 16);
+    ctx.fillText("块数=" + n + "  最高擦写=" + max, 180, H - 12);
+    els.wearLegend.textContent = "每块均有颜色：绿(低磨损)→黄→红(接近寿命上限)，柱高表示擦写次数。";
     els.wearWrap.classList.remove("hidden");
   }
 

@@ -1,15 +1,23 @@
 /**
  * main_kv.c - KV 存储逻辑框架运行验证
  *
- * 两种模式（环境变量切换）：
- *  默认：一致性自检（写入/读取/更新/删除/掉电残留丢弃/GC）。
- *  KV_FUNC=1：功能压测模式，可配置：
- *      KV_CAPACITY  KV 区容量(字节)
- *      KV_N         条目数量
- *      KV_VLEN      每条 value 长度(字节)
- *      KV_ROUNDS    修改轮数（每轮随机更新+读取）
- *      KV_MODFREQ   每轮修改比例(0~100)，其余为读取
- *  输出（后端解析）：STATS_JSON:{...} 与 WEARMAP:...
+ * 测试驱动（环境变量）：
+ *   KV_CAPACITY   KV 区容量(字节)
+ *   KV_TESTS      启用的测试项（逗号分隔），可勾选：
+ *                   write_read 基础写入/读取
+ *                   update     更新覆盖
+ *                   delete     删除
+ *                   powerloss  掉电残留丢弃
+ *                   gc         压实垃圾回收
+ *                   func       功能压测（按条目表累加执行）
+ *                 不设置则运行全部基础项。
+ *   KV_ITEMS      功能压测条目表（func 项使用），格式：
+ *                   LEN,N,FREQ;LEN,N,FREQ
+ *                   LEN=value长度 N=条目数 FREQ=每轮修改比例(0~100)
+ *                 不设置则使用一条默认条目。
+ *   KV_ROUNDS     功能压测每条目修改轮数（默认 20）
+ *
+ * 输出（后端解析）：STATS_JSON:{...} 与 WEARMAP:...
  */
 
 #include "flash_sim.h"
@@ -34,126 +42,118 @@ static long env_long(const char *k, long def)
     return (v && *v) ? atol(v) : def;
 }
 
-/* -------- 默认：一致性自检（保留原验证） -------- */
-static int self_check(flash_dev_t *dev, uint32_t base, uint32_t size)
+/* 简单 LCG 随机 */
+static uint32_t s_seed;
+static uint32_t rnd(void) { s_seed = s_seed * 1664525u + 1013904223u; return s_seed; }
+
+/* 基础测试项 */
+static void t_write_read(flash_dev_t *dev, uint32_t base, uint32_t size)
 {
-    expect("kv_init", kv_init(dev, base, size) == FLASH_OK);
+    kv_init(dev, base, size);
+    const char *v = "hello-kv";
+    expect("write_read: write", kv_write(dev, 1, v, (uint16_t)strlen(v)) == FLASH_OK);
+    char rb[32] = {0}; uint16_t rl = sizeof(rb);
+    expect("write_read: read", kv_read(dev, 1, rb, &rl) == FLASH_OK);
+    expect("write_read: match", rl == strlen(v) && memcmp(rb, v, rl) == 0);
+}
 
-    const char *v1 = "hello-kv";
-    expect("kv_write key1", kv_write(dev, 1, v1, (uint16_t)strlen(v1)) == FLASH_OK);
-    char rb[32] = {0}; uint16_t rlen = sizeof(rb);
-    expect("kv_read key1", kv_read(dev, 1, rb, &rlen) == FLASH_OK);
-    expect("kv_read 内容一致", rlen == strlen(v1) && memcmp(rb, v1, rlen) == 0);
+static void t_update(flash_dev_t *dev, uint32_t base, uint32_t size)
+{
+    kv_init(dev, base, size);
+    const char *v = "v1";
+    kv_write(dev, 1, v, (uint16_t)strlen(v));
+    const char *v2 = "updated-value!!";
+    expect("update: write", kv_write(dev, 1, v2, (uint16_t)strlen(v2)) == FLASH_OK);
+    char rb[32] = {0}; uint16_t rl = sizeof(rb);
+    expect("update: read latest", kv_read(dev, 1, rb, &rl) == FLASH_OK);
+    expect("update: match", rl == strlen(v2) && memcmp(rb, v2, rl) == 0);
+}
 
+static void t_delete(flash_dev_t *dev, uint32_t base, uint32_t size)
+{
+    kv_init(dev, base, size);
     int32_t num = 0x12345678;
-    expect("kv_write key2(int)", kv_write(dev, 2, &num, sizeof(num)) == FLASH_OK);
-    int32_t rnum = 0; uint16_t rn = sizeof(rnum);
-    expect("kv_read key2", kv_read(dev, 2, &rnum, &rn) == FLASH_OK);
-    expect("kv_read int 一致", rn == sizeof(num) && rnum == num);
-
-    const char *v1b = "updated!!";
-    expect("kv_write key1(更新)", kv_write(dev, 1, v1b, (uint16_t)strlen(v1b)) == FLASH_OK);
-    char rb2[32] = {0}; uint16_t rlen2 = sizeof(rb2);
-    expect("kv_read key1(最新)", kv_read(dev, 1, rb2, &rlen2) == FLASH_OK);
-    expect("kv_read 最新一致", rlen2 == strlen(v1b) && memcmp(rb2, v1b, rlen2) == 0);
-
-    expect("kv_delete key2", kv_delete(dev, 2) == FLASH_OK);
+    kv_write(dev, 2, &num, sizeof(num));
+    expect("delete: delete", kv_delete(dev, 2) == FLASH_OK);
     uint16_t dl = 4;
-    expect("kv_read key2(已删)", kv_read(dev, 2, NULL, &dl) == FLASH_ERR_ARGS);
+    expect("delete: read-deleted", kv_read(dev, 2, NULL, &dl) == FLASH_ERR_ARGS);
+}
 
-    /* 掉电残留丢弃：注入一笔 PENDING 残记录，加载后应忽略 */
+static void t_powerloss(flash_dev_t *dev, uint32_t base, uint32_t size)
+{
+    kv_init(dev, base, size);
+    /* 注入一笔 PENDING 残记录（状态字未提交），加载时应忽略 */
     kv_header_t h; h.magic = KV_MAGIC; h.key_id = 99; h.len = 3; h.crc = 0;
     flash_sim_write(dev, base + size - 32, &h, sizeof(h));
+    kv_init(dev, base, size); /* 重新加载，99 不应出现 */
+    uint16_t dl = 8;
+    expect("powerloss: 残留丢弃", kv_read(dev, 99, NULL, &dl) == FLASH_ERR_ARGS);
+}
 
-    /* 压实触发：反复写同一 key 直到 GC */
+static void t_gc(flash_dev_t *dev, uint32_t base, uint32_t size)
+{
+    kv_init(dev, base, size);
     char big[200]; memset(big, 0xAB, sizeof(big));
     for (int i = 0; i < 200; i++) {
         if (kv_write(dev, 7, big, (uint16_t)sizeof(big)) != FLASH_OK) break;
     }
     uint16_t blen = sizeof(big); char bback[sizeof(big)] = {0};
-    expect("压实后 kv_read key7", kv_read(dev, 7, bback, &blen) == FLASH_OK);
-    expect("压实后 内容一致", blen == sizeof(big) && memcmp(bback, big, blen) == 0);
-    return 0;
+    expect("gc: read after gc", kv_read(dev, 7, bback, &blen) == FLASH_OK);
+    expect("gc: match", blen == sizeof(big) && memcmp(bback, big, blen) == 0);
 }
 
-/* -------- 功能压测模式 -------- */
-static int func_test(flash_dev_t *dev, uint32_t base, uint32_t size)
+/* 单条目功能压测；累加统计到 *acc */
+static void func_item(flash_dev_t *dev, uint32_t base, uint32_t size,
+                      uint32_t vlen, uint32_t n, uint32_t freq, uint32_t rounds,
+                      uint32_t *acc_ops, uint32_t *acc_lost)
 {
-    uint32_t n = (uint32_t)env_long("KV_N", 50);
-    uint32_t vlen = (uint32_t)env_long("KV_VLEN", 32);
-    uint32_t rounds = (uint32_t)env_long("KV_ROUNDS", 20);
-    uint32_t modfreq = (uint32_t)env_long("KV_MODFREQ", 50); /* 0~100 */
+    kv_init(dev, base, size);
     if (vlen > KV_MAX_VALUE) vlen = KV_MAX_VALUE;
     if (n == 0) n = 1;
-    if (modfreq > 100) modfreq = 100;
-
-    expect("kv_init", kv_init(dev, base, size) == FLASH_OK);
-
-    /* 简易确定性随机（LCG），便于复现 */
-    uint32_t seed = 0x1234u;
-    #define RND() (seed = seed * 1664525u + 1013904223u)
+    if (freq > 100) freq = 100;
 
     uint8_t *buf = (uint8_t *)malloc(vlen ? vlen : 1);
     uint8_t *rbuf = (uint8_t *)malloc(vlen ? vlen : 1);
     uint32_t lost = 0;
-    uint32_t ops = 0;
 
-    /* 初始写入 N 条 */
     for (uint32_t k = 1; k <= n; k++) {
-        for (uint32_t j = 0; j < vlen; j++) buf[j] = (uint8_t)RND();
-        if (kv_write(dev, (uint16_t)k, buf, (uint16_t)vlen) != FLASH_OK) {
-            expect("func initial write", 0);
-        }
-        ops++;
+        for (uint32_t j = 0; j < vlen; j++) buf[j] = (uint8_t)rnd();
+        kv_write(dev, (uint16_t)k, buf, (uint16_t)vlen);
+        (*acc_ops)++;
     }
-
-    /* 多轮修改/读取 */
     for (uint32_t r = 0; r < rounds; r++) {
         for (uint32_t k = 1; k <= n; k++) {
-            uint32_t pick = RND() % 100;
-            if (pick < modfreq) {
-                /* 修改 */
-                for (uint32_t j = 0; j < vlen; j++) buf[j] = (uint8_t)RND();
-                if (kv_write(dev, (uint16_t)k, buf, (uint16_t)vlen) != FLASH_OK) {
-                    /* 可能触发 GC 后成功，重试一次 */
-                    kv_write(dev, (uint16_t)k, buf, (uint16_t)vlen);
-                }
-                ops++;
-                /* 立即读回校验数据丢失 */
+            if ((rnd() % 100) < freq) {
+                for (uint32_t j = 0; j < vlen; j++) buf[j] = (uint8_t)rnd();
+                kv_write(dev, (uint16_t)k, buf, (uint16_t)vlen);
+                (*acc_ops)++;
                 uint16_t rl = (uint16_t)vlen;
                 if (kv_read(dev, (uint16_t)k, rbuf, &rl) == FLASH_OK) {
                     if (rl != vlen || memcmp(buf, rbuf, vlen) != 0) lost++;
                 }
             } else {
                 uint16_t rl = (uint16_t)vlen;
-                if (kv_read(dev, (uint16_t)k, rbuf, &rl) == FLASH_OK) ops++;
+                if (kv_read(dev, (uint16_t)k, rbuf, &rl) == FLASH_OK) (*acc_ops)++;
             }
         }
     }
     free(buf); free(rbuf);
+    *acc_lost += lost;
+    printf("    [info] 条目(长度=%u,条数=%u,频率=%u%%): 数据丢失=%u\n",
+           vlen, n, freq, lost);
+}
 
-    /* 统计：从基座取性能与磨损 */
-    flash_stats_t st;
-    flash_sim_get_stats(dev, &st);
-    printf("STATS_JSON:{\"mode\":\"func\",\"entries\":%u,\"vlen\":%u,"
-           "\"rounds\":%u,\"modfreq\":%u,\"ops\":%u,\"lost\":%u,"
-           "\"block_us\":%llu,\"reads\":%u,\"writes\":%u,\"erases\":%u}\n",
-           n, vlen, rounds, modfreq, ops, lost,
-           (unsigned long long)(st.read_time_us + st.write_time_us + st.erase_time_us),
-           st.total_reads, st.total_writes, st.total_erases);
-
-    uint32_t bc = flash_sim_block_count(dev);
-    if (bc > 0) {
-        uint32_t *map = (uint32_t *)malloc(sizeof(uint32_t) * bc);
-        if (map) {
-            flash_sim_get_wear_map(dev, map, bc);
-            printf("WEARMAP:");
-            for (uint32_t i = 0; i < bc; i++) printf("%s%u", i ? "," : "", map[i]);
-            printf("\n");
-            free(map);
-        }
+static int has_test(const char *tests, const char *name)
+{
+    if (!tests || !*tests) return 1; /* 未指定则全跑 */
+    const char *p = tests;
+    while (*p) {
+        const char *comma = strchr(p, ',');
+        size_t len = comma ? (size_t)(comma - p) : strlen(p);
+        if (len == strlen(name) && strncmp(p, name, len) == 0) return 1;
+        if (!comma) break;
+        p = comma + 1;
     }
-    expect("功能测试数据丢失为0", lost == 0);
     return 0;
 }
 
@@ -180,34 +180,66 @@ int main(void)
 
     uint32_t capacity = (uint32_t)env_long("KV_CAPACITY",
                                 (cfg.total_size >= 8192) ? 8192 : cfg.total_size);
-    /* KV 区需擦除后使用 */
     flash_sim_erase(dev, 0, capacity);
 
-    if (env_long("KV_FUNC", 0) == 1) {
-        func_test(dev, 0, capacity);
+    const char *tests = getenv("KV_TESTS");
+    const char *items = getenv("KV_ITEMS");
+    uint32_t rounds = (uint32_t)env_long("KV_ROUNDS", 20);
+
+    if (has_test(tests, "write_read")) { printf("\n[测试项] 基础写入/读取\n"); t_write_read(dev, 0, capacity); }
+    if (has_test(tests, "update"))     { printf("\n[测试项] 更新覆盖\n"); t_update(dev, 0, capacity); }
+    if (has_test(tests, "delete"))     { printf("\n[测试项] 删除\n"); t_delete(dev, 0, capacity); }
+    if (has_test(tests, "powerloss"))  { printf("\n[测试项] 掉电残留丢弃\n"); t_powerloss(dev, 0, capacity); }
+    if (has_test(tests, "gc"))         { printf("\n[测试项] 压实 GC\n"); t_gc(dev, 0, capacity); }
+
+    if (has_test(tests, "func")) {
+        printf("\n[测试项] 功能压测（条目表）\n");
+        uint32_t acc_ops = 0, acc_lost = 0;
+        if (items && *items) {
+            const char *p = items;
+            while (*p) {
+                /* 解析 LEN,N,FREQ */
+                uint32_t vlen = (uint32_t)strtoul(p, (char **)&p, 10);
+                if (*p == ',') p++;
+                uint32_t n = (uint32_t)strtoul(p, (char **)&p, 10);
+                if (*p == ',') p++;
+                uint32_t freq = (uint32_t)strtoul(p, (char **)&p, 10);
+                func_item(dev, 0, capacity, vlen, n, freq, rounds, &acc_ops, &acc_lost);
+                if (*p == ';') p++; else break;
+            }
+        } else {
+            func_item(dev, 0, capacity, 32, 50, 50, rounds, &acc_ops, &acc_lost);
+        }
+        flash_stats_t fst; flash_sim_get_stats(dev, &fst);
+        printf("STATS_JSON:{\"mode\":\"func\",\"ops\":%u,\"lost\":%u,"
+               "\"block_us\":%llu,\"reads\":%u,\"writes\":%u,\"erases\":%u}\n",
+               acc_ops, acc_lost,
+               (unsigned long long)(fst.read_time_us + fst.write_time_us + fst.erase_time_us),
+               fst.total_reads, fst.total_writes, fst.total_erases);
+        expect("功能压测数据丢失为0", acc_lost == 0);
     } else {
-        self_check(dev, 0, capacity);
-        printf("  [info] 性能与磨损统计：\n");
+        /* 非功能压测模式也输出基础统计 */
         flash_stats_t st; flash_sim_get_stats(dev, &st);
-        printf("STATS_JSON:{\"reads\":%u,\"writes\":%u,\"erases\":%u,"
-               "\"write_bytes\":%u,\"max_cycles\":%u,\"avg_cycles\":%u,"
-               "\"read_us\":%llu,\"write_us\":%llu,\"erase_us\":%llu,"
-               "\"bad_blocks\":%u}\n",
+        printf("STATS_JSON:{\"mode\":\"basic\",\"reads\":%u,\"writes\":%u,"
+               "\"erases\":%u,\"write_bytes\":%u,\"max_cycles\":%u,"
+               "\"avg_cycles\":%u,\"read_us\":%llu,\"write_us\":%llu,"
+               "\"erase_us\":%llu,\"bad_blocks\":%u}\n",
                st.total_reads, st.total_writes, st.total_erases,
                st.total_write_bytes, st.max_erase_cycles, st.avg_erase_cycles,
                (unsigned long long)st.read_time_us,
                (unsigned long long)st.write_time_us,
                (unsigned long long)st.erase_time_us, st.bad_block_count);
-        uint32_t bc = flash_sim_block_count(dev);
-        if (bc > 0) {
-            uint32_t *map = (uint32_t *)malloc(sizeof(uint32_t) * bc);
-            if (map) {
-                flash_sim_get_wear_map(dev, map, bc);
-                printf("WEARMAP:");
-                for (uint32_t i = 0; i < bc; i++) printf("%s%u", i ? "," : "", map[i]);
-                printf("\n");
-                free(map);
-            }
+    }
+
+    uint32_t bc = flash_sim_block_count(dev);
+    if (bc > 0) {
+        uint32_t *map = (uint32_t *)malloc(sizeof(uint32_t) * bc);
+        if (map) {
+            flash_sim_get_wear_map(dev, map, bc);
+            printf("WEARMAP:");
+            for (uint32_t i = 0; i < bc; i++) printf("%s%u", i ? "," : "", map[i]);
+            printf("\n");
+            free(map);
         }
     }
 

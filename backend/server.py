@@ -72,11 +72,9 @@ SIM_ENV_MAP = {
 # KV 测试可配置项 -> 环境变量名
 KV_ENV_MAP = {
     "capacity": "KV_CAPACITY",
-    "func": "KV_FUNC",
-    "n": "KV_N",
-    "vlen": "KV_VLEN",
     "rounds": "KV_ROUNDS",
-    "modfreq": "KV_MODFREQ",
+    "tests": "KV_TESTS",   # 数组 -> 逗号拼接
+    "items": "KV_ITEMS",   # 数组 -> LEN,N,FREQ;... 拼接
 }
 
 # 配置项 schema（前端渲染表单用）：group 区分"模拟基座"与"测试"
@@ -102,21 +100,6 @@ SIM_CONFIG_SCHEMA = [
      "default": 0, "min": 0, "step": 1, "group": "simulator"},
     {"key": "bad_ratio", "label": "运行时坏块比率(万分之)", "type": "number",
      "default": 0, "min": 0, "max": 10000, "step": 1, "group": "simulator"},
-]
-KV_TEST_CONFIG_SCHEMA = [
-    {"key": "func", "label": "功能压测模式", "type": "select",
-     "options": [["0", "一致性自检"], ["1", "功能压测"]], "default": "0",
-     "group": "test"},
-    {"key": "capacity", "label": "KV 区容量(字节)", "type": "number",
-     "default": 8192, "min": 1024, "step": 1024, "group": "test"},
-    {"key": "n", "label": "条目数量", "type": "number",
-     "default": 50, "min": 1, "step": 1, "group": "test"},
-    {"key": "vlen", "label": "每条 value 长度(字节)", "type": "number",
-     "default": 32, "min": 1, "step": 1, "group": "test"},
-    {"key": "rounds", "label": "修改轮数", "type": "number",
-     "default": 20, "min": 1, "step": 1, "group": "test"},
-    {"key": "modfreq", "label": "每轮修改比例(%)", "type": "number",
-     "default": 50, "min": 0, "max": 100, "step": 1, "group": "test"},
 ]
 
 FRAMEWORKS = [
@@ -144,7 +127,20 @@ FRAMEWORKS = [
         "includes": ["simulator", "frameworks/kv"],
         "workdir": "frameworks/kv/test",
         "config_schema": SIM_CONFIG_SCHEMA,
-        "test_schema": KV_TEST_CONFIG_SCHEMA,
+        "test_schema": [
+            {"key": "capacity", "label": "KV 区容量(字节)", "type": "number",
+             "default": 8192, "min": 1024, "step": 1024, "group": "test"},
+            {"key": "rounds", "label": "功能压测轮数", "type": "number",
+             "default": 20, "min": 1, "step": 1, "group": "test"},
+        ],
+        "test_items": [
+            {"id": "write_read", "label": "基础写入/读取"},
+            {"id": "update", "label": "更新覆盖"},
+            {"id": "delete", "label": "删除"},
+            {"id": "powerloss", "label": "掉电残留丢弃"},
+            {"id": "gc", "label": "压实 GC"},
+            {"id": "func", "label": "功能压测(条目表)"},
+        ],
     },
     # 后续框架（fs / baremetal / ota）在此追加注册即可被前端发现
 ]
@@ -178,7 +174,7 @@ def parse_output(text):
         if "[OK]" in line or "[OK  ]" in line:
             level = "ok"
             ok_count += 1
-        elif "[FAIL]" in line or "[FAIL]" in line:
+        elif "[FAIL]" in line:
             level = "fail"
             fail_count += 1
         elif "全部通过" in line:
@@ -208,8 +204,21 @@ def _build_env(config, test_config):
                 env[envk] = str(config[k])
     if test_config:
         for k, envk in KV_ENV_MAP.items():
-            if k in test_config and test_config[k] != "":
-                env[envk] = str(test_config[k])
+            if k not in test_config or test_config[k] == "":
+                continue
+            v = test_config[k]
+            if k == "tests" and isinstance(v, list):
+                env[envk] = ",".join(str(x) for x in v)
+            elif k == "items" and isinstance(v, list):
+                # 每条目序列化为 LEN,N,FREQ
+                parts = []
+                for it in v:
+                    parts.append("%s,%s,%s" % (it.get("vlen", 0),
+                                              it.get("n", 0),
+                                              it.get("freq", 0)))
+                env[envk] = ";".join(parts)
+            else:
+                env[envk] = str(v)
     return env
 
 
@@ -376,7 +385,8 @@ class Handler(BaseHTTPRequestHandler):
             builtin = [
                 {"id": f["id"], "name": f["name"], "desc": f["desc"],
                  "config_schema": f.get("config_schema", []),
-                 "test_schema": f.get("test_schema", [])}
+                 "test_schema": f.get("test_schema", []),
+                 "test_items": f.get("test_items", [])}
                 for f in FRAMEWORKS
             ]
             imported = importer.imported_frameworks()
