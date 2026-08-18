@@ -140,6 +140,9 @@ APP_ADAPTER_MAP = {
     "flashdb": "app/adapter/flashdb_ad.c",
     "fastflash": "app/adapter/fastflash_ad.c",
     "nvdm": "app/adapter/nvdm_ad.c",
+    "nvs": "app/adapter/nvs_ad.c",
+    "zms": "app/adapter/zms_ad.c",
+    "fcb": "app/adapter/fcb_ad.c",
     "baremetal": "app/adapter/baremetal_ad.c",
     "fs": "app/adapter/fs_store_ad.c",
     "littlefs": "app/adapter/littlefs_ad.c",
@@ -458,6 +461,135 @@ FRAMEWORKS = [
         "config_schema": SIM_CONFIG_SCHEMA,
         "test_schema": [
             {"key": "capacity", "label": "NVDM 区容量(字节)", "type": "number",
+             "default": 16384, "min": 2048, "step": 1024, "group": "test"},
+            {"key": "rounds", "label": "功能压测轮数", "type": "number",
+             "default": 20, "min": 1, "step": 1, "group": "test"},
+        ],
+        "test_items": [
+            {"id": "write_read", "label": "基础写入/读取"},
+            {"id": "update", "label": "更新覆盖"},
+            {"id": "delete", "label": "删除"},
+            {"id": "powerloss", "label": "掉电安全"},
+            {"id": "gc", "label": "垃圾回收"},
+            {"id": "types", "label": "多类型数据"},
+            {"id": "func", "label": "功能压测(条目表)"},
+        ],
+    },
+    # ---- Zephyr 存储组件（FCB/NVS/ZMS）：vendor 零修改，经共享
+    # ---- Zephyr 兼容层（frameworks/zephyr_compat）桥接模拟基座 ----
+    {
+        "id": "fcb",
+        "_comment": "Zephyr FCB：闪存环形缓冲（append-only 日志/事件流 + 回卷覆盖 + "
+                    "CRC 校验 + 重启恢复）；适配层以 key 前缀实现 KV 语义",
+        "name": "Zephyr FCB (Flash 环形缓冲/KV)",
+        "category": CATEGORY_KV,
+        "desc": "Zephyr Flash Circular Buffer：append-only 环形日志，写入超容量自动回卷覆盖，"
+                "支持遍历/轮转/清空与掉电恢复。适配层以 key 前缀实现 KV 语义。",
+        "sources": [
+            "simulator/flash_sim.c",
+            "frameworks/zephyr_compat/zephyr_compat.c",
+            "frameworks/fcb/vendor/fcb.c",
+            "frameworks/fcb/vendor/fcb_append.c",
+            "frameworks/fcb/vendor/fcb_elem_info.c",
+            "frameworks/fcb/vendor/fcb_getnext.c",
+            "frameworks/fcb/vendor/fcb_rotate.c",
+            "frameworks/fcb/vendor/fcb_walk.c",
+            "frameworks/fcb/test/main_fcb.c",
+        ],
+        "includes": [
+            "simulator",
+            "frameworks/zephyr_compat",
+            "frameworks/zephyr_compat/include",
+            "frameworks/fcb/vendor/include",
+        ],
+        "cflags": [
+            "-DCONFIG_FLASH_HAS_EXPLICIT_ERASE",
+        ],
+        "workdir": "frameworks/fcb/test",
+        "config_schema": SIM_CONFIG_SCHEMA,
+        "test_schema": [
+            {"key": "capacity", "label": "FCB 区容量(字节)", "type": "number",
+             "default": 16384, "min": 2048, "step": 1024, "group": "test"},
+            {"key": "rounds", "label": "功能压测轮数", "type": "number",
+             "default": 20, "min": 1, "step": 1, "group": "test"},
+        ],
+        "test_items": [
+            {"id": "append", "label": "追加/首条读取"},
+            {"id": "walk", "label": "全量遍历"},
+            {"id": "rotate", "label": "扇区轮转"},
+            {"id": "clear", "label": "清空"},
+            {"id": "powerloss", "label": "掉电恢复"},
+            {"id": "func", "label": "功能压测(条目表)"},
+        ],
+    },
+    {
+        "id": "nvs",
+        "_comment": "Zephyr NVS：ID+数据键值存储（扇区式 ATE 日志 + 掉电安全 + GC），"
+                    "vendor 零修改，经 Zephyr 兼容层桥接",
+        "name": "Zephyr NVS (KV/裸机持久化)",
+        "category": CATEGORY_KV,
+        "desc": "Zephyr Non-Volatile Storage：扇区式键值存储，ATE 日志 + CRC 校验，"
+                "掉电安全与自动垃圾回收。适配层以 key hash 映射 16 位 ID。",
+        "sources": [
+            "simulator/flash_sim.c",
+            "frameworks/zephyr_compat/zephyr_compat.c",
+            "frameworks/nvs/vendor/nvs.c",
+            "frameworks/nvs/test/main_nvs.c",
+        ],
+        "includes": [
+            "simulator",
+            "frameworks/zephyr_compat",
+            "frameworks/zephyr_compat/include",
+            "frameworks/nvs/vendor/include",
+        ],
+        "cflags": [
+            "-DCONFIG_FLASH_HAS_EXPLICIT_ERASE",
+        ],
+        "workdir": "frameworks/nvs/test",
+        "config_schema": SIM_CONFIG_SCHEMA,
+        "test_schema": [
+            {"key": "capacity", "label": "NVS 区容量(字节)", "type": "number",
+             "default": 16384, "min": 2048, "step": 1024, "group": "test"},
+            {"key": "rounds", "label": "功能压测轮数", "type": "number",
+             "default": 20, "min": 1, "step": 1, "group": "test"},
+        ],
+        "test_items": [
+            {"id": "write_read", "label": "基础写入/读取"},
+            {"id": "update", "label": "更新覆盖"},
+            {"id": "delete", "label": "删除"},
+            {"id": "powerloss", "label": "掉电安全"},
+            {"id": "gc", "label": "垃圾回收"},
+            {"id": "types", "label": "多类型数据"},
+            {"id": "func", "label": "功能压测(条目表)"},
+        ],
+    },
+    {
+        "id": "zms",
+        "_comment": "Zephyr ZMS（Zephyr Memory Storage）：固定大小槽位键值存储，"
+                    "磨损均衡 + 掉电安全，定位替代 NVS",
+        "name": "Zephyr ZMS (KV/固定槽位存储)",
+        "category": CATEGORY_KV,
+        "desc": "Zephyr Memory Storage：固定大小槽位键值存储，ATE + 数据 CRC，"
+                "磨损均衡与掉电安全。适配层以 key hash 映射 32 位 ID。",
+        "sources": [
+            "simulator/flash_sim.c",
+            "frameworks/zephyr_compat/zephyr_compat.c",
+            "frameworks/zms/vendor/zms.c",
+            "frameworks/zms/test/main_zms.c",
+        ],
+        "includes": [
+            "simulator",
+            "frameworks/zephyr_compat",
+            "frameworks/zephyr_compat/include",
+            "frameworks/zms/vendor/include",
+        ],
+        "cflags": [
+            "-DCONFIG_FLASH_HAS_EXPLICIT_ERASE",
+        ],
+        "workdir": "frameworks/zms/test",
+        "config_schema": SIM_CONFIG_SCHEMA,
+        "test_schema": [
+            {"key": "capacity", "label": "ZMS 区容量(字节)", "type": "number",
              "default": 16384, "min": 2048, "step": 1024, "group": "test"},
             {"key": "rounds", "label": "功能压测轮数", "type": "number",
              "default": 20, "min": 1, "step": 1, "group": "test"},
