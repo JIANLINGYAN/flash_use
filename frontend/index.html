@@ -39,8 +39,9 @@
     <!-- 功能标签页 -->
     <div class="tabs" role="tablist">
       <button class="tab active" data-tab="run">① 运行测试</button>
-      <button class="tab" data-tab="gen">② 代码生成</button>
-      <button class="tab" data-tab="import">③ 导入库文件</button>
+      <button class="tab" data-tab="app">② 应用层测试</button>
+      <button class="tab" data-tab="gen">③ 代码生成</button>
+      <button class="tab" data-tab="import">④ 导入库文件</button>
     </div>
 
     <!-- ① 运行测试 -->
@@ -85,11 +86,50 @@
       </div>
     </section>
 
-    <!-- ② 代码生成 -->
+    <!-- ② 应用层测试（统一任务引擎 + 适配层 + 组件） -->
+    <section id="tab-app" class="tab-panel">
+      <div class="panel">
+        <div class="panel-head">
+          <h3>应用层测试（跨组件对比评估）</h3>
+          <span class="meta">统一任务引擎通过适配层调用组件层，输出吞吐/写放大/磨损</span>
+        </div>
+        <p class="hint">
+          应用层测试框架：选择组件与任务，任务引擎会通过该组件的适配器调用组件层框架，
+          并在应用层独立计时与计算性能（吞吐、写放大、介质阻塞、磨损分布）。与组件自带
+          自检不同，这里是<b>统一任务、统一指标</b>的横向对比测试。
+        </p>
+        <div id="app-config" class="config-area">
+          <p class="hint">正在加载应用层测试配置…</p>
+        </div>
+        <div class="run-bar">
+          <button id="app-run-btn" class="btn btn-primary btn-lg">运行应用层测试</button>
+          <button id="app-run-all-btn" class="btn">批量跑全部组件</button>
+        </div>
+      </div>
+
+      <div id="app-result" class="panel hidden">
+        <div class="panel-head"><h3>应用层测试结果</h3></div>
+        <div id="app-rt-log" class="rt-log">
+          <div class="rt-log-head">
+            <span class="rt-log-title">运行时日志（实时）</span>
+            <span id="app-rt-status" class="rt-log-status">空闲</span>
+            <button id="app-rt-clear" class="btn btn-sm">清空</button>
+          </div>
+          <div id="app-rt-body" class="rt-log-body"><span class="hint">运行日志将实时显示在这里。</span></div>
+        </div>
+        <pre id="app-output" class="output"><span class="hint">选择组件与任务后点击「运行应用层测试」。</span></pre>
+        <div id="app-wear" class="wear-wrap hidden">
+          <h3>整片磨损分布（每块擦写次数）</h3>
+          <canvas id="app-wear-canvas" width="900" height="170"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <!-- ③ 代码生成 -->
     <section id="tab-gen" class="tab-panel">
       <div class="panel">
         <div class="panel-head"><h3>代码生成（导出库文件）</h3></div>
-        <p class="hint">选择框架并填写参数，生成可直接移植的库文件包（含 .c/.h、移植说明与自检入口），下载到本地。</p>
+        <p class="hint">选择框架并填写参数，生成可直接移植的库文件包（core/vendor/port/config/include/demo 分层，仅依赖统一 HAL 契约 flash_hal_t，含移植说明与 AI 移植提示词），下载到本地。</p>
         <div class="toolbar">
           <select id="gen-framework" class="select"></select>
           <button id="gen-btn" class="btn btn-primary">生成并下载</button>
@@ -99,7 +139,7 @@
       </div>
     </section>
 
-    <!-- ③ 导入库文件 -->
+    <!-- ④ 导入库文件 -->
     <section id="tab-import" class="tab-panel">
       <div class="panel">
         <div class="panel-head"><h3>导入库文件（闭环验证）</h3></div>

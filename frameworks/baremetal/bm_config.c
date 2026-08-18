@@ -35,7 +35,7 @@ static bool part_read(bm_config_t *ctx, uint32_t base, bm_header_t *hdr,
                       void *payload)
 {
     bm_header_t h;
-    if (flash_sim_read(ctx->dev, base, &h, sizeof(h)) != FLASH_OK) {
+    if (ctx->hal->read(ctx->hal->ctx, base, &h, sizeof(h)) != 0) {
         return false;
     }
     if (h.magic != BM_MAGIC) { return false; }
@@ -44,8 +44,8 @@ static bool part_read(bm_config_t *ctx, uint32_t base, bm_header_t *hdr,
     /* 读 payload 并校验 CRC，确保数据完整（掉电写坏会在此被发现） */
     uint8_t buf[BM_MAX_PAYLOAD];
     if (h.len > BM_MAX_PAYLOAD) { return false; }
-    if (flash_sim_read(ctx->dev, base + sizeof(bm_header_t), buf, h.len)
-        != FLASH_OK) {
+    if (ctx->hal->read(ctx->hal->ctx, base + sizeof(bm_header_t), buf, h.len)
+        != 0) {
         return false;
     }
     if (bm_crc32(buf, h.len) != h.crc) { return false; }
@@ -55,26 +55,26 @@ static bool part_read(bm_config_t *ctx, uint32_t base, bm_header_t *hdr,
     return true;
 }
 
-flash_err_t bm_config_init(bm_config_t *ctx, flash_dev_t *dev,
-                           uint32_t base_a, uint32_t base_b,
-                           uint32_t part_size, uint32_t payload_len)
+int bm_config_init(bm_config_t *ctx, const flash_hal_t *hal,
+                   uint32_t base_a, uint32_t base_b,
+                   uint32_t part_size, uint32_t payload_len)
 {
-    if (!ctx || !dev || payload_len == 0
+    if (!ctx || !hal || payload_len == 0
         || payload_len > BM_MAX_PAYLOAD) {
-        return FLASH_ERR_ARGS;
+        return FLASH_HAL_ERR_ARGS;
     }
     if (part_size < sizeof(bm_header_t) + payload_len) {
-        return FLASH_ERR_ARGS; /* 分区装不下头部+配置体 */
+        return FLASH_HAL_ERR_ARGS; /* 分区装不下头部+配置体 */
     }
     /* A/B 不得重叠 */
     if ((base_a < base_b && base_a + part_size > base_b)
         || (base_b < base_a && base_b + part_size > base_a)
         || base_a == base_b) {
-        return FLASH_ERR_ARGS;
+        return FLASH_HAL_ERR_ARGS;
     }
 
     memset(ctx, 0, sizeof(*ctx));
-    ctx->dev = dev;
+    ctx->hal = hal;
     ctx->base_a = base_a;
     ctx->base_b = base_b;
     ctx->part_size = part_size;
@@ -103,14 +103,14 @@ flash_err_t bm_config_init(bm_config_t *ctx, flash_dev_t *dev,
         ctx->cur_seq = hb.seq;
     }
 
-    return FLASH_OK;
+    return 0;
 }
 
-flash_err_t bm_config_load(bm_config_t *ctx, void *out)
+int bm_config_load(bm_config_t *ctx, void *out)
 {
-    if (!ctx || !out) { return FLASH_ERR_ARGS; }
+    if (!ctx || !out) { return FLASH_HAL_ERR_ARGS; }
     if (ctx->cur_part < 0) {
-        return FLASH_ERR_ARGS; /* 无有效配置（首次上电） */
+        return FLASH_HAL_ERR_ARGS; /* 无有效配置（首次上电） */
     }
 
     uint32_t base = (ctx->cur_part == 0) ? ctx->base_a : ctx->base_b;
@@ -125,17 +125,17 @@ flash_err_t bm_config_load(bm_config_t *ctx, void *out)
         if (part_read(ctx, other, &h2, out)) {
             ctx->cur_part = (ctx->cur_part == 0) ? 1 : 0;
             ctx->cur_seq = h2.seq;
-            return FLASH_OK;
+            return 0;
         }
         ctx->cur_part = -1;
-        return FLASH_ERR_ARGS;
+        return FLASH_HAL_ERR_ARGS;
     }
-    return FLASH_OK;
+    return 0;
 }
 
-flash_err_t bm_config_save(bm_config_t *ctx, const void *in)
+int bm_config_save(bm_config_t *ctx, const void *in)
 {
-    if (!ctx || !in) { return FLASH_ERR_ARGS; }
+    if (!ctx || !in) { return FLASH_HAL_ERR_ARGS; }
 
     /*
      * 选择目标分区：写入"非当前生效"的那个，实现 A/B 轮换。
@@ -152,13 +152,13 @@ flash_err_t bm_config_save(bm_config_t *ctx, const void *in)
     }
 
     /* 1) 擦除目标分区（NOR 写入前必须擦除） */
-    flash_err_t rc = flash_sim_erase(ctx->dev, target, ctx->part_size);
-    if (rc != FLASH_OK) { return rc; }
+    int rc = ctx->hal->erase(ctx->hal->ctx, target, ctx->part_size);
+    if (rc != 0) { return rc; }
 
     /* 2) 先写 payload（此时头部仍为 0xFF，分区被视为无效） */
-    rc = flash_sim_write(ctx->dev, target + sizeof(bm_header_t), in,
+    rc = ctx->hal->write(ctx->hal->ctx, target + sizeof(bm_header_t), in,
                          ctx->payload_len);
-    if (rc != FLASH_OK) { return rc; }
+    if (rc != 0) { return rc; }
 
     /* 3) 最后写头部：magic+seq+crc 一次性落盘，完成"提交" */
     bm_header_t h;
@@ -167,31 +167,31 @@ flash_err_t bm_config_save(bm_config_t *ctx, const void *in)
     h.len = ctx->payload_len;
     h.crc = bm_crc32(in, ctx->payload_len);
 
-    rc = flash_sim_write(ctx->dev, target, &h, sizeof(h));
-    if (rc != FLASH_OK) { return rc; }
+    rc = ctx->hal->write(ctx->hal->ctx, target, &h, sizeof(h));
+    if (rc != 0) { return rc; }
 
     ctx->cur_part = target_part;
     ctx->cur_seq = h.seq;
-    return FLASH_OK;
+    return 0;
 }
 
-flash_err_t bm_config_reset(bm_config_t *ctx)
+int bm_config_reset(bm_config_t *ctx)
 {
-    if (!ctx) { return FLASH_ERR_ARGS; }
+    if (!ctx) { return FLASH_HAL_ERR_ARGS; }
 
-    flash_err_t rc = flash_sim_erase(ctx->dev, ctx->base_a, ctx->part_size);
-    if (rc != FLASH_OK) { return rc; }
-    rc = flash_sim_erase(ctx->dev, ctx->base_b, ctx->part_size);
-    if (rc != FLASH_OK) { return rc; }
+    int rc = ctx->hal->erase(ctx->hal->ctx, ctx->base_a, ctx->part_size);
+    if (rc != 0) { return rc; }
+    rc = ctx->hal->erase(ctx->hal->ctx, ctx->base_b, ctx->part_size);
+    if (rc != 0) { return rc; }
 
     ctx->cur_part = -1;
     ctx->cur_seq = 0;
-    return FLASH_OK;
+    return 0;
 }
 
-flash_err_t bm_config_status(bm_config_t *ctx, bm_status_t *st)
+int bm_config_status(bm_config_t *ctx, bm_status_t *st)
 {
-    if (!ctx || !st) { return FLASH_ERR_ARGS; }
+    if (!ctx || !st) { return FLASH_HAL_ERR_ARGS; }
 
     bm_header_t ha, hb;
     memset(st, 0, sizeof(*st));
@@ -201,5 +201,5 @@ flash_err_t bm_config_status(bm_config_t *ctx, bm_status_t *st)
     st->a_seq = st->a_valid ? ha.seq : 0u;
     st->b_seq = st->b_valid ? hb.seq : 0u;
     st->active = ctx->cur_part;
-    return FLASH_OK;
+    return 0;
 }

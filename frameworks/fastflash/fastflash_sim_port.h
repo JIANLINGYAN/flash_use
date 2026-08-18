@@ -1,29 +1,31 @@
 /**
- * fastflash_sim_port.h - fast_flashdb_table 模拟基座移植层头文件
+ * fastflash_sim_port.h - fast_flashdb_table 移植层头文件（注册式，平台无关）
  *
- * 声明对接本平台模拟基座（simulator/flash_sim.c）的移植接口，供组件
- * 与测试程序引用。与 easyflash/ef_port.h、flashdb 的 fal 头文件同一定位。
+ * 声明把 fast_flashdb_table 的 flash_ops_t 桥接到统一 flash_hal_t 的
+ * 注册接口：目标平台实现 flash_hal_t 后调用 fast_flash_port_init 注册。
+ * 与 easyflash/ef_port.h、flashdb/fal_flash_sim_port.h 同一定位。
  */
 #ifndef FASTFLASH_SIM_PORT_H
 #define FASTFLASH_SIM_PORT_H
 
+#include <stdint.h>
+#include "flash_hal.h"
 #include "fast_flash_types.h"
-#include "flash_sim.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* 按环境变量配置并打开模拟基座设备；返回 0 表示成功 */
-int  fast_flash_sim_init_device(const char *bin_path);
+/**
+ * 注册 HAL（内部用 hal 实现组件所需的 flash_ops_t）。
+ * @param hal  统一 flash_hal_t（实现 read/write/erase）
+ * @return     0 成功，非 0 失败
+ */
+int fast_flash_port_init(const flash_hal_t *hal);
 
-/* 关闭模拟基座设备 */
-void fast_flash_sim_deinit_device(void);
-
-/* 返回当前模拟设备句柄（供统计/磨损图查询使用） */
-flash_dev_t *fast_flash_sim_device(void);
-
-/* 对接组件的全局 flash_ops_t 实例 */
+/**
+ * 供组件使用的 flash_ops_t 实例（由 fast_flash_port_init 桥接到 hal）。
+ */
 extern const flash_ops_t sim_flash_ops;
 
 #ifdef __cplusplus

@@ -24,6 +24,7 @@
 #include "fast_flash_core.h"
 #include "fast_flash_types.h"
 #include "fastflash_sim_port.h"   /* 提供 sim_flash_ops 与设备初始化 */
+#include "flash_hal_adapter.h"
 #include "flash_sim.h"
 
 #include <stdio.h>
@@ -189,13 +190,32 @@ int main(void)
     printf("=== fast_flashdb_table 组件运行验证 ===\n");
 
     uint32_t total = (uint32_t)env_long("SIM_TOTAL", 64 * 1024);
-    if (fast_flash_sim_init_device(FLT_BIN) != 0) {
+    /* 删除上次运行残留的介质文件，保证每次从全新介质开始
+     * （与 kv/easyflash/flashdb 测试的"整区擦除"语义一致，测试可重复运行） */
+    remove(FLT_BIN);
+    /* 打开介质 -> 包装为统一 flash_hal_t -> 注册给移植层 */
+    flash_config_t fc;
+    memset(&fc, 0, sizeof(fc));
+    fc.type = (flash_type_t)env_long("SIM_TYPE", FLASH_TYPE_NOR);
+    fc.total_size = total;
+    fc.erase_size = (uint32_t)env_long("SIM_ERASE", 4096);
+    fc.write_size = (uint32_t)env_long("SIM_WRITE", 1);
+    fc.erase_cycles = (uint32_t)env_long("SIM_CYCLES", 100000);
+    fc.bin_path = FLT_BIN;
+    flash_dev_t *dev = flash_sim_init(&fc);
+    if (!dev) {
         printf("  [FAIL] 模拟基座初始化失败!\n");
+        return 1;
+    }
+    flash_hal_t hal;
+    flash_hal_from_sim(dev, fc.total_size, fc.erase_size, fc.write_size, &hal);
+    if (fast_flash_port_init(&hal) != 0) {
+        printf("  [FAIL] fast_flash 移植层注册失败!\n");
         return 1;
     }
     if (fast_flash_init(&sim_flash_ops, total, true) != 0) {
         printf("  [FAIL] fast_flash_init 失败!\n");
-        fast_flash_sim_deinit_device();
+        flash_sim_deinit(dev);
         return 1;
     }
     printf("  [OK  ] 组件初始化成功\n");
@@ -222,7 +242,7 @@ int main(void)
     /* 输出结构化统计（后端 parse_stats 解析） */
     {
         flash_stats_t fst;
-        flash_sim_get_stats(fast_flash_sim_device(), &fst);
+        flash_sim_get_stats(dev, &fst);
         printf("STATS_JSON:{\"reads\":%u,\"writes\":%u,\"erases\":%u,"
                "\"read_us\":%llu,\"write_us\":%llu,\"erase_us\":%llu,"
                "\"total_write_bytes\":%u,\"erase_cycles\":%u}\n",
@@ -232,12 +252,12 @@ int main(void)
                (unsigned long long)fst.erase_time_us,
                fst.total_write_bytes, 100000u);
 
-        uint32_t nblk = flash_sim_block_count(fast_flash_sim_device());
+        uint32_t nblk = flash_sim_block_count(dev);
         uint32_t *wm = NULL;
         if (nblk > 0) {
             wm = (uint32_t *)malloc(sizeof(uint32_t) * nblk);
             if (wm) {
-                uint32_t got = flash_sim_get_wear_map(fast_flash_sim_device(), wm, nblk);
+                uint32_t got = flash_sim_get_wear_map(dev, wm, nblk);
                 printf("WEARMAP:");
                 for (uint32_t i = 0; i < got; i++) printf("%s%u", i ? "," : "", wm[i]);
                 printf("\n");
@@ -247,6 +267,6 @@ int main(void)
     }
 
     printf("\n=== 自检结束: %s ===\n", g_fail == 0 ? "全部通过" : "存在失败");
-    fast_flash_sim_deinit_device();
+    flash_sim_deinit(dev);
     return g_fail == 0 ? 0 : 1;
 }

@@ -14,8 +14,8 @@
  *                            -> 启动时选择另一分区 Y（CRC 正确、seq 次新）
  *    因此任何时刻至多损失"最后一次未完成的保存"，绝不会两个分区同时损坏。
  *
- * 平台无关：仅依赖 C99 与 flash_sim 接口；移植到真实 MCU 只需替换
- * flash_sim_read/write/erase 为对应驱动。
+ * 平台无关：仅依赖 C99 与 flash_hal.h 注册接口；移植到真实 MCU 只需
+ * 实现 flash_hal_t 的 read/write/erase 回调并注册给 bm_config_init。
  */
 
 #ifndef BM_CONFIG_H
@@ -25,7 +25,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 
-#include "flash_sim.h"
+#include "flash_hal.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -52,7 +52,7 @@ typedef struct {
  * 框架句柄。使用者需为其分配存储（可为全局静态变量，裸机无动态内存）。
  */
 typedef struct {
-    flash_dev_t *dev;      /* 底层 Flash 设备 */
+    const flash_hal_t *hal; /* 统一 HAL 注册实例 */
     uint32_t base_a;       /* 分区 A 起始偏移（块对齐） */
     uint32_t base_b;       /* 分区 B 起始偏移（块对齐） */
     uint32_t part_size;    /* 单个分区大小（字节，>= 头部+payload） */
@@ -62,29 +62,29 @@ typedef struct {
 } bm_config_t;
 
 /**
- * 初始化：绑定设备与 A/B 分区，并扫描两个分区确定当前生效者。
+ * 初始化：绑定 HAL 与 A/B 分区，并扫描两个分区确定当前生效者。
  *
  * @param ctx         句柄（由调用者提供存储）
- * @param dev         已由 flash_sim_init 创建的设备
+ * @param hal         已注册的 flash_hal_t（实现 read/write/erase）
  * @param base_a      分区 A 起始偏移（须块对齐）
  * @param base_b      分区 B 起始偏移（须块对齐，且不与 A 重叠）
  * @param part_size   单分区大小（须 >= sizeof(bm_header_t)+payload_len）
  * @param payload_len 配置体长度（<= BM_MAX_PAYLOAD）
- * @return            FLASH_OK 成功（无论是否已有有效数据）；
- *                    FLASH_ERR_ARGS 参数非法
+ * @return            0 成功（无论是否已有有效数据）；
+ *                    FLASH_HAL_ERR_ARGS 参数非法
  */
-flash_err_t bm_config_init(bm_config_t *ctx, flash_dev_t *dev,
-                           uint32_t base_a, uint32_t base_b,
-                           uint32_t part_size, uint32_t payload_len);
+int bm_config_init(bm_config_t *ctx, const flash_hal_t *hal,
+                   uint32_t base_a, uint32_t base_b,
+                   uint32_t part_size, uint32_t payload_len);
 
 /**
  * 读取当前生效的配置。
  *
  * @param out  输出缓冲（至少 payload_len 字节）
- * @return     FLASH_OK 读到有效配置；
- *             FLASH_ERR_ARGS 两个分区均无有效数据（首次上电，应写入默认值）
+ * @return     0 读到有效配置；
+ *             FLASH_HAL_ERR_ARGS 两个分区均无有效数据（首次上电，应写入默认值）
  */
-flash_err_t bm_config_load(bm_config_t *ctx, void *out);
+int bm_config_load(bm_config_t *ctx, void *out);
 
 /**
  * 保存配置（写入较旧的那个分区，实现 A/B 轮换与磨损分摊）。
@@ -92,14 +92,14 @@ flash_err_t bm_config_load(bm_config_t *ctx, void *out);
  * 头部最后写入，确保中途掉电时该分区不会被误判为有效。
  *
  * @param in  配置体数据（payload_len 字节）
- * @return    FLASH_OK 成功；其他为介质错误
+ * @return    0 成功；其他为介质错误
  */
-flash_err_t bm_config_save(bm_config_t *ctx, const void *in);
+int bm_config_save(bm_config_t *ctx, const void *in);
 
 /**
- * 恢复出厂：擦除两个分区（下次 load 将返回 FLASH_ERR_ARGS）。
+ * 恢复出厂：擦除两个分区（下次 load 将返回 FLASH_HAL_ERR_ARGS）。
  */
-flash_err_t bm_config_reset(bm_config_t *ctx);
+int bm_config_reset(bm_config_t *ctx);
 
 /**
  * 分区健康状态（用于诊断与前端展示）。
@@ -112,7 +112,7 @@ typedef struct {
     int8_t   active;    /* 当前生效分区：0=A，1=B，-1=无 */
 } bm_status_t;
 
-flash_err_t bm_config_status(bm_config_t *ctx, bm_status_t *st);
+int bm_config_status(bm_config_t *ctx, bm_status_t *st);
 
 /**
  * 计算 CRC32（对外暴露，便于上层自行校验或做单元测试）。

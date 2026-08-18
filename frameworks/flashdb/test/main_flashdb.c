@@ -22,6 +22,7 @@
 #include <flashdb.h>
 
 #include "fal_flash_sim_port.h"
+#include "flash_hal_adapter.h"
 #include "flash_sim.h"
 
 #include <stdio.h>
@@ -364,8 +365,11 @@ int main(void)
     /* 从干净介质开始 */
     flash_sim_erase(dev, 0, capacity);
 
+    flash_hal_t hal;
+    flash_hal_from_sim(dev, cfg.total_size, cfg.erase_size, cfg.write_size, &hal);
+
     int verbose = (int)env_long("FDB_VERBOSE", 0);
-    int pr = fal_sim_port_init(dev, cfg.total_size, cfg.erase_size,
+    int pr = fal_sim_port_init(&hal, cfg.total_size, cfg.erase_size,
                               0, capacity, verbose);
     if (pr != 0) {
         printf("  [FAIL] FAL 初始化失败 (rc=%d)\n", pr);
