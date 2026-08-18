@@ -81,7 +81,7 @@ flash_use/
 │   ├── app.js
 │   └── style.css
 ├── docs/
-│   └── prompt_extract_framework.md  # AI 提取提示词：从其他项目提取 flash 框架
+│   └── prompt_extract_framework.md  # AI 提取提示词：从源项目提取 flash 框架并打包转移
 ├── scripts/              # 构建/工具脚本
 │   ├── run_tests.py/.sh  #   一键编译并运行全部框架测试（--app 跑应用层测试）
 │   ├── check_app_build.py#   快速验证全部组件应用层编译
@@ -362,9 +362,17 @@ gcc -std=c99 -DCONFIG_YAFFS_DIRECT -DCONFIG_YAFFS_DEFINES_TYPES \
 ## 从其他项目提取 Flash 框架（AI 提示词）
 
 需要把其他项目中的 Flash 存储组件（KV / 文件系统 / 裸机配置）导入本平台
-对比测试时，请使用 `docs/prompt_extract_framework.md` 中的提示词交给 AI：
-它会按统一规范提取 vendor 源码（零修改）、编写移植层（sim_port）与适配器
-（app/adapter），并接入应用层测试框架做横向性能对比。
+对比测试时，分两步完成：
+
+1. **源项目侧（提取打包）**：把 `docs/prompt_extract_framework.md` 交给
+   源项目里的 AI。该 AI 看不到本平台代码，只需定位并提取框架本体
+   （vendor 零修改），整理成自包含目录（含 `PORTING.md` 移植文档、
+   `MANIFEST.md` 提取清单、`bsp_reference/` 平台适配参考），打包成
+   压缩包交付。
+2. **本平台侧（移植适配）**：拿到压缩包后放入 `flash_use`，由本平台 AI
+   依据包内 `PORTING.md` 的 HAL 接口规格与 `bsp_reference/` 参考样例，
+   编写移植层（sim_port）与适配器（app/adapter），接入应用层测试框架
+   做横向性能对比。
 
 ## 包格式（导入契约）
 
@@ -403,6 +411,6 @@ xxx_library.zip
 - [x] **应用层独立性能计算**：吞吐(ops/s, KB/s)、写放大、介质阻塞耗时、磨损分布、数据丢失校验
 - [x] **前端分类展示**：框架按 驱动层/裸机/KV/文件系统 分组；新增「应用层测试」标签页（单组件/批量对比 + 实时性能卡片）
 - [x] **后端应用层接口**：`/api/app/run` 与 `/api/app/run/stream`（SSE 流式），编译配置由 registry `app_layer_for` 推导
-- [x] **框架提取提示词**：`docs/prompt_extract_framework.md` 指导 AI 从其他项目提取 flash 框架做对比测试
+- [x] **框架提取提示词**：`docs/prompt_extract_framework.md` 指导源项目 AI 提取 flash 框架并打包（vendor 零修改 + PORTING.md 移植文档），由本平台 AI 依据包内文档完成移植适配
 - [ ] 模块三 AI 接口（规划中，本次未实现）
 - [ ] 模块二 OTA 差分框架（规划中）
