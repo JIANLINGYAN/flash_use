@@ -320,7 +320,107 @@ FRAMEWORKS = [
             {"id": "powerloss", "label": "掉电重放"},
         ],
     },
-    # 后续框架（fs / ota）在此追加注册即可被前端发现
+    {
+        "id": "fs",
+        "name": "自研文件系统 (fs_store)",
+        "desc": "基于模拟基座的简易块式文件系统：文件分配表 + 数据块，支持多文件"
+                "读写、某文件频繁修改（原地覆盖/扩展迁移）、追加、删除与查询。",
+        "sources": [
+            "simulator/flash_sim.c",
+            "frameworks/fs/fs_store.c",
+            "frameworks/fs/test/main_fs.c",
+        ],
+        "includes": [
+            "simulator",
+            "frameworks/fs",
+        ],
+        "workdir": "frameworks/fs/test",
+        "config_schema": SIM_CONFIG_SCHEMA,
+        "test_schema": [
+            {"key": "rounds", "label": "单文件频繁修改轮数", "type": "number",
+             "default": 30, "min": 1, "step": 1, "group": "test"},
+        ],
+        "test_env": {"tests": "FS_TESTS", "rounds": "FS_ROUNDS"},
+        "test_items": [
+            {"id": "create", "label": "创建多个文件"},
+            {"id": "write_read", "label": "多文件写入/读取"},
+            {"id": "update", "label": "单文件频繁修改"},
+            {"id": "append", "label": "追加写"},
+            {"id": "delete", "label": "删除文件"},
+            {"id": "query", "label": "大小/存在性查询"},
+            {"id": "powerloss", "label": "掉电重放"},
+        ],
+    },
+    {
+        "id": "littlefs",
+        "name": "LittleFS (开源文件系统)",
+        "desc": "littlefs-project/littlefs v2.x：面向嵌入式的小型掉电安全文件系统，"
+                "具备掉电保护、磨损均衡与动态磨损感知。通过移植层对接模拟基座。",
+        "open_source": True,
+        "vendor": "littlefs-project/littlefs",
+        "repo": "https://github.com/littlefs-project/littlefs",
+        "sources": [
+            "simulator/flash_sim.c",
+            "frameworks/littlefs/littlefs_sim_port.c",
+            "frameworks/littlefs/vendor/lfs.c",
+            "frameworks/littlefs/vendor/lfs_util.c",
+            "frameworks/littlefs/test/main_littlefs.c",
+        ],
+        "includes": [
+            "simulator",
+            "frameworks/littlefs",
+            "frameworks/littlefs/vendor",
+        ],
+        "workdir": "frameworks/littlefs/test",
+        "config_schema": SIM_CONFIG_SCHEMA,
+        "test_env": {"tests": "LFS_TESTS"},
+        "test_items": [
+            {"id": "mount", "label": "格式化+挂载"},
+            {"id": "create", "label": "创建多个文件"},
+            {"id": "write_read", "label": "多文件写入/读取"},
+            {"id": "update", "label": "单文件频繁修改"},
+            {"id": "append", "label": "追加写"},
+            {"id": "delete", "label": "删除文件"},
+            {"id": "query", "label": "大小/存在性查询"},
+            {"id": "powerloss", "label": "掉电重放"},
+        ],
+    },
+    {
+        "id": "fatfs",
+        "name": "FatFs (开源文件系统)",
+        "desc": "ChaN/FatFs R0.16：通用 FAT/exFAT 文件系统模块，经移植层（扇区"
+                "读写读改写）对接模拟基座，支持多文件读写、频繁修改、增删查询。",
+        "open_source": True,
+        "vendor": "elm-chan/FatFs",
+        "repo": "https://github.com/abbrev/fatfs",
+        "sources": [
+            "simulator/flash_sim.c",
+            "frameworks/fatfs/fatfs_sim_port.c",
+            "frameworks/fatfs/vendor/ff.c",
+            "frameworks/fatfs/vendor/ffsystem.c",
+            "frameworks/fatfs/vendor/ffunicode.c",
+            "frameworks/fatfs/test/main_fatfs.c",
+        ],
+        "includes": [
+            "simulator",
+            "frameworks/fatfs",
+            "frameworks/fatfs/vendor",
+        ],
+        "workdir": "frameworks/fatfs/test",
+        "config_schema": SIM_CONFIG_SCHEMA,
+        "test_env": {"tests": "FATFS_TESTS"},
+        "test_items": [
+            {"id": "mount", "label": "格式化+挂载"},
+            {"id": "create", "label": "创建多个文件"},
+            {"id": "write_read", "label": "多文件写入/读取"},
+            {"id": "update", "label": "单文件频繁修改"},
+            {"id": "append", "label": "追加写"},
+            {"id": "delete", "label": "删除文件"},
+            {"id": "query", "label": "大小/存在性查询"},
+            {"id": "powerloss", "label": "掉电重放"},
+        ],
+    },
+    # 后续框架（ota 等）在此追加注册即可被前端发现
 ]
 
 

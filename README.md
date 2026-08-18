@@ -1,8 +1,8 @@
 # Flash 存储仿真平台
 
 嵌入式 Flash 存储管理设计与仿真平台。已完成 **模块一（模拟基座）**、
-**模块二（KV/NVS 框架 + 常见开源 KV 组件 + 裸机双备份框架 + 轻量表组件）**，
-并提供 **前端模拟运行界面** 进行可视化验证。
+**模块二（KV/NVS 框架 + 常见开源 KV 组件 + 裸机双备份框架 + 轻量表组件 +
+文件系统框架）**，并提供 **前端模拟运行界面** 进行可视化验证。
 
 ## 项目结构
 
@@ -28,10 +28,21 @@ flash_use/
 │   ├── baremetal/        #   裸机结构体配置框架（A/B 双备份 + CRC32 + 单调序号）
 │   │   ├── bm_config.h/.c
 │   │   └── test/main_baremetal.c
-│   └── fastflash/        #   开源组件 fast_flashdb_table（轻量表存储）
-│       ├── fastflash_sim_port.c/.h  # 移植层：对接模拟基座
-│       ├── vendor/fast_flashdb_table# upstream 源码（core/ + port_win/）
-│       └── test/main_fastflash.c
+│   ├── fastflash/        #   开源组件 fast_flashdb_table（轻量表存储）
+│   │   ├── fastflash_sim_port.c/.h  # 移植层：对接模拟基座
+│   │   ├── vendor/fast_flashdb_table# upstream 源码（core/ + port_win/）
+│   │   └── test/main_fastflash.c
+│   ├── fs/               #   自研文件系统框架（块分配表 + 数据块）
+│   │   ├── fs_store.h/.c #     多文件读写/频繁修改/追加/删除/查询
+│   │   └── test/main_fs.c
+│   ├── littlefs/         #   开源文件系统（littlefs-project/littlefs v2.x）
+│   │   ├── littlefs_sim_port.c/.h  # 移植层：块设备回调对接模拟基座
+│   │   ├── vendor/       #     upstream 源码（lfs.c/lfs_util.*）
+│   │   └── test/main_littlefs.c
+│   └── fatfs/            #   开源文件系统（ChaN/FatFs R0.16）
+│       ├── fatfs_sim_port.c/.h     # 移植层：扇区读改写对接模拟基座
+│       ├── vendor/       #     upstream 源码（ff.c/ff.h/ffconf.h/...）
+│       └── test/main_fatfs.c
 ├── backend/              # 模块三/四后端：仿真服务 + API + 注册表
 │   ├── server.py         #   纯标准库 HTTP 服务：列框架 / 编译运行 / 返回结果
 │   ├── registry.py       #   框架注册表（框架元数据唯一事实来源）
@@ -77,8 +88,11 @@ flash_use/
 [PASS] flashdb
 [PASS] baremetal
 [PASS] fastflash
+[PASS] fs
+[PASS] littlefs
+[PASS] fatfs
 ===========================================
-通过 8/8
+通过 11/11
 ```
 
 > 测试脚本复用 `backend/registry.py` 注册表，编译/运行参数与后端
@@ -125,6 +139,23 @@ gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/fastflash \
     frameworks/fastflash/vendor/fast_flashdb_table/core/fast_flash_log.c \
     frameworks/fastflash/fastflash_sim_port.c \
     frameworks/fastflash/test/main_fastflash.c && /tmp/flt
+
+# 自研文件系统框架
+gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/fs \
+    -o /tmp/fs simulator/flash_sim.c frameworks/fs/fs_store.c \
+    frameworks/fs/test/main_fs.c && /tmp/fs
+
+# LittleFS（开源文件系统）
+gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/littlefs -Iframeworks/littlefs/vendor \
+    -o /tmp/lfs simulator/flash_sim.c frameworks/littlefs/littlefs_sim_port.c \
+    frameworks/littlefs/vendor/lfs.c frameworks/littlefs/vendor/lfs_util.c \
+    frameworks/littlefs/test/main_littlefs.c && /tmp/lfs
+
+# FatFs（开源文件系统）
+gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/fatfs -Iframeworks/fatfs/vendor \
+    -o /tmp/ff simulator/flash_sim.c frameworks/fatfs/fatfs_sim_port.c \
+    frameworks/fatfs/vendor/ff.c frameworks/fatfs/vendor/ffsystem.c \
+    frameworks/fatfs/vendor/ffunicode.c frameworks/fatfs/test/main_fatfs.c && /tmp/ff
 ```
 
 ### 3. 前端（模拟运行 + 代码生成 + 导入闭环）
@@ -141,7 +172,7 @@ gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/fastflash \
    整片**磨损分布柱状图**（颜色越红越接近寿命上限）。
 2. **代码生成（导出库文件）**：选框架、填参数 → 「生成并下载」→ 下载 zip 包
    （含 `.c/.h` + `test_main.c` 自检入口 + `PORTING.md` 移植说明 + `manifest.json`）。
-   可导出：kv / simulator / easyflash / flashdb / baremetal。
+   可导出：kv / simulator / easyflash / flashdb / baremetal / fs / littlefs / fatfs。
 3. **导入库文件（闭环验证）**：上传刚下载的 zip → 后端校验是否符合模拟基座接口要求
    （`manifest.requires=="flash_sim"` 且源码 `#include "flash_sim.h"`）、编译运行自带自检 →
    通过后注册为可用框架，出现在①中可直接「运行测试」。
@@ -197,8 +228,11 @@ xxx_library.zip
 - [x] 模块二 开源 KV 组件 **FlashDB**（KVDB + FAL：磨损均衡 + 掉电保护 + GC + blob/遍历），模拟基座验证 0 擦写/GC 错误
 - [x] 模块二 裸机结构体配置框架（A/B 双备份 + CRC32 + 单调序号掉电恢复 + 磨损分摊），模拟基座验证 0 数据丢失
 - [x] 模块二 开源组件 **fast_flashdb_table**（轻量表存储：建表/按索引读写/追加/删除/GC/掉电重放），经移植层对接模拟基座运行验证通过
-- [x] 模块三 代码生成引擎（导出库包：.c/.h + 移植说明，支持 kv/simulator/easyflash/flashdb/baremetal）+ 导入闭环校验
+- [x] 模块二 自研文件系统框架 **fs_store**（块分配表 + 数据块：多文件创建/读写、单文件频繁修改、追加、删除、查询、掉电重放），模拟基座验证通过
+- [x] 模块二 开源文件系统 **LittleFS**（littlefs-project v2.x：掉电安全 + 磨损均衡），经移植层对接模拟基座运行验证通过
+- [x] 模块二 开源文件系统 **FatFs**（ChaN R0.16：FAT12/16 格式化 + 多文件操作），经扇区读改写移植层对接模拟基座运行验证通过
+- [x] 模块三 代码生成引擎（导出库包：.c/.h + 移植说明，支持 kv/simulator/easyflash/flashdb/baremetal/fs/littlefs/fatfs）+ 导入闭环校验
 - [x] 模块四 前端模拟运行界面（选框架 / **配置化表单（基座+测试）** / 性能统计卡片 / **磨损柱状图** / 生成下载 / 导入验证）
-- [x] 工程化 统一测试脚本（`scripts/run_tests.sh` 一键跑全部 8 项测试）、框架注册表独立（`backend/registry.py`）
+- [x] 工程化 统一测试脚本（`scripts/run_tests.sh` 一键跑全部 11 项测试）、框架注册表独立（`backend/registry.py`）
 - [ ] 模块三 AI 接口（规划中，本次未实现）
-- [ ] 模块二 文件系统 / OTA 差分框架（规划中）
+- [ ] 模块二 OTA 差分框架（规划中）

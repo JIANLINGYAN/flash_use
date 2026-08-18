@@ -105,6 +105,55 @@ RECIPES = {
         "extra_includes": [],
         "requires": "flash_sim",
     },
+    "fs": {
+        "lib_name": "fs_store",
+        "title": "自研文件系统 (fs_store)",
+        "desc": "简易块式文件系统：文件分配表 + 数据块，多文件读写/频繁修改/追加/删除/查询。",
+        "src_dir": "frameworks/fs",
+        "copy_files": [
+            "frameworks/fs/fs_store.c",
+            "frameworks/fs/fs_store.h",
+        ],
+        "test_entry": "frameworks/fs/test/main_fs.c",
+        "extra_includes": [],
+        "requires": "flash_sim",
+    },
+    "littlefs": {
+        "lib_name": "littlefs",
+        "title": "LittleFS (开源文件系统)",
+        "desc": "littlefs-project/littlefs v2.x：嵌入式掉电安全文件系统，含磨损均衡。",
+        "src_dir": "frameworks/littlefs",
+        "copy_files": [
+            "frameworks/littlefs/littlefs_sim_port.c",
+            "frameworks/littlefs/littlefs_sim_port.h",
+            "frameworks/littlefs/vendor/lfs.c",
+            "frameworks/littlefs/vendor/lfs.h",
+            "frameworks/littlefs/vendor/lfs_util.c",
+            "frameworks/littlefs/vendor/lfs_util.h",
+        ],
+        "test_entry": "frameworks/littlefs/test/main_littlefs.c",
+        "extra_includes": [],
+        "requires": "flash_sim",
+    },
+    "fatfs": {
+        "lib_name": "fatfs",
+        "title": "FatFs (开源文件系统)",
+        "desc": "ChaN/FatFs R0.16：通用 FAT 文件系统模块，经移植层对接模拟基座。",
+        "src_dir": "frameworks/fatfs",
+        "copy_files": [
+            "frameworks/fatfs/fatfs_sim_port.c",
+            "frameworks/fatfs/fatfs_sim_port.h",
+            "frameworks/fatfs/vendor/ff.c",
+            "frameworks/fatfs/vendor/ff.h",
+            "frameworks/fatfs/vendor/ffconf.h",
+            "frameworks/fatfs/vendor/ffsystem.c",
+            "frameworks/fatfs/vendor/ffunicode.c",
+            "frameworks/fatfs/vendor/diskio.h",
+        ],
+        "test_entry": "frameworks/fatfs/test/main_fatfs.c",
+        "extra_includes": [],
+        "requires": "flash_sim",
+    },
 }
 
 
@@ -227,6 +276,9 @@ def _render_porting_md(fw_id, recipe, params):
             "easyflash": "调用 `easyflash_init()` 后使用 `ef_set_env / ef_get_env` 访问 KV。",
             "flashdb": "调用 `fdb_kvdb_init()` 后使用 `fdb_kv_set / fdb_kv_get` 访问 KV。",
             "baremetal": "调用 `bm_config_init()` 后使用 `bm_config_save / bm_config_load` 保存结构体。",
+            "fs": "调用 `fs_init / fs_create / fs_write / fs_read / fs_delete` 进行多文件读写与管理。",
+            "littlefs": "调用 `lfs_mount` 挂载后使用 `lfs_file_open/write/read/close` 访问文件。",
+            "fatfs": "调用 `f_mount` 挂载后使用 `f_open / f_write / f_read / f_close` 访问文件。",
         }.get(fw_id, "参考框架自带头文件 API。")
         body = (
             "## 移植步骤\n\n"
