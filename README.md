@@ -116,7 +116,7 @@ flash_use/
 > **新增框架** 只需两步：① 源码放入 `frameworks/<name>/`（含 `test/main_*.c`）；
 > ② 在 `backend/registry.py` 的 `FRAMEWORKS` 注册表追加一项。前端发现、
 > 测试脚本、编译运行都会自动覆盖。需要支持「代码生成导出」时再在
-> `backend/generator.py` 的 `RECIPES` 追加配方（fastflash 当前未接入导出）。
+> `backend/generator.py` 的 `RECIPES` 追加配方（当前全部 16 个组件均已接入导出）。
 
 ## 快速开始
 
@@ -344,10 +344,14 @@ gcc -std=c99 -DCONFIG_YAFFS_DIRECT -DCONFIG_YAFFS_DEFINES_TYPES \
    （可配置介质类型/容量/擦除块大小/最小写入单位/标称寿命/读写擦耗时/坏块数量与比率、
    KV 条目数/长度/修改轮数/修改频率等）→ 「运行测试」→ 逐行结果 + 性能统计卡片 +
    整片**磨损分布柱状图**（颜色越红越接近寿命上限）。
-2. **代码生成（导出库文件）**：选框架、填参数 → 「生成并下载」→ 下载 zip 包
-   （含 `.c/.h` + `test_main.c` 自检入口 + `PORTING.md` 移植说明 + `manifest.json`）。
-   可导出：kv / simulator / easyflash / flashdb / baremetal / fs / littlefs /
-   fatfs / spiffs / yaffs。
+2. **代码生成（导出库文件）**：选框架、填参数 → 「生成并下载」→ 下载 zip 包。
+   包内按 `core/vendor/port/config/include/demo` 分层组织，附 `README.md` 总览、
+   `PORTING.md` 完整移植文档（API/HAL 契约/配置/编译/限制/验证）、
+   `HAL_CONTRACT.md` 统一适配接口契约、`AI_PORTING_PROMPT.md`（投喂给目标
+   工程 AI 的移植提示词）、自检入口 `demo/test_main.c` 与 `demo/BUILD.md`
+   （可一键在 PC 冒烟）。全部 16 个组件均可导出：kv / simulator / easyflash /
+   flashdb / baremetal / fs / littlefs / fatfs / spiffs / yaffs / fcb / nvs /
+   zms / tym_setting / fastflash / nvdm。
 3. **应用层测试（跨组件对比）**：在「应用层测试」标签页选择组件与任务
    （写入/读取/更新/耐久/掉电安全/混合），可调数据项数/长度/轮数等，也可一键
    「批量跑全部组件」——统一任务引擎通过适配层调用各组件，实时输出性能统计
@@ -426,8 +430,10 @@ gcc -std=c99 -DCONFIG_YAFFS_DIRECT -DCONFIG_YAFFS_DEFINES_TYPES \
 - `generator.py`：导出库包生成。
 - `importer.py`：导入 zip 校验与注册。
 
-所有生成的 C 库均可脱离本平台，直接移植到真实 MCU Flash 驱动（仅需将
-`flash_sim_*` 替换为真实驱动实现，见包内 `PORTING.md`）。
+所有生成的 C 库均可脱离本平台，直接移植到真实 MCU Flash 驱动（仅需按
+`include/flash_sim.h` 契约将 `flash_sim_*` 替换为真实驱动实现，见包内
+`PORTING.md` 与 `HAL_CONTRACT.md`；也可将包目录连同 `AI_PORTING_PROMPT.md`
+交给目标工程里的 AI 完成移植适配）。
 
 ## 从其他项目提取 Flash 框架（AI 提示词）
 
@@ -446,18 +452,29 @@ gcc -std=c99 -DCONFIG_YAFFS_DIRECT -DCONFIG_YAFFS_DEFINES_TYPES \
 
 ## 包格式（导入契约）
 
+导出 zip 采用分层结构（导入时自动剥离顶层 `<lib>_library/` 目录）：
+
 ```
-xxx_library.zip
-├── <lib>.c / <lib>.h   核心库（平台无关，可能含多个 .c）
-├── test_main.c         标自检入口（对接 flash_sim.h）
-├── PORTING.md          移植说明
-└── manifest.json       { id, name, requires:"flash_sim", entry, lib,
-                          lib_sources:[...], params }
+<lib>_library/
+├── README.md           总览：快速上手 + 目录结构 + 文档索引
+├── PORTING.md          完整移植文档（API / HAL 契约 / 配置 / 编译 / 集成 / 限制 / 验证）
+├── HAL_CONTRACT.md     统一适配接口契约（所有框架一致的 Flash 操作抽象）
+├── AI_PORTING_PROMPT.md 给目标工程 AI 的移植提示词（可直接投喂）
+├── manifest.json       { id, name, requires:"flash_sim", entry, lib,
+                           lib_sources:[...], cflags, includes, params }
+├── core/               框架核心（平台无关）或 HAL 参考实现 core/flash_sim.c
+├── vendor/             开源/厂商源码（零修改，只读）
+├── port/               平台移植层（目标平台替换/重写点）
+├── config/             配置文件模板（分区/几何参数）
+├── include/            对外公共头 + HAL 契约头 include/flash_sim.h
+└── demo/               自检入口 test_main.c + 构建说明 BUILD.md（可 PC 一键冒烟）
 ```
 
 导入校验规则：缺 manifest、requires≠flash_sim、源码未依赖 flash_sim.h、
 或编译/运行自带自检失败，均会被拒绝并给出原因。开源组件（easyflash/flashdb）
-导出包内含上游多源文件，运行时会一并编译 `lib_sources` 列出的库源。
+导出包内含上游多源文件，运行时会一并编译 `lib_sources` 列出的库源；zephyr 系
+组件（fcb/nvs/zms）保留 `<zephyr/...>` 头路径结构，由 `manifest.includes`
+声明 include 目录。
 
 ## 完成状态
 
@@ -477,7 +494,7 @@ xxx_library.zip
 - [x] 模块二 开源文件系统 **FatFs**（ChaN R0.16：FAT12/16 格式化 + 多文件操作），经扇区读改写移植层对接模拟基座运行验证通过
 - [x] 模块二 开源文件系统 **SPIFFS**（pellepl：SPI NOR 掉电安全 + 垃圾回收），经 HAL 回调移植层对接模拟基座运行验证通过
 - [x] 模块二 开源文件系统 **YAFFS**（YAFFS2 Direct，GPL v2：NAND 日志型 + 检查点 + 磨损均衡），经 chunk+oob 驱动移植层对接模拟基座运行验证通过
-- [x] 模块三 代码生成引擎（导出库包：.c/.h + 移植说明，支持 kv/simulator/easyflash/flashdb/baremetal/nvs/zms/fcb/tym_setting/fs/littlefs/fatfs/spiffs/yaffs）+ 导入闭环校验
+- [x] 模块三 代码生成引擎（导出库包：core/vendor/port/config/include/demo 分层 + 统一 HAL 契约 + 完整 PORTING.md + **AI 移植提示词**，全部 16 组件可导出）+ 导入闭环校验（保留子目录结构，支持 manifest.includes/相对 cflags）
 - [x] 模块四 前端模拟运行界面（选框架 / **配置化表单（基座+测试）** / 性能统计卡片 / **磨损柱状图** / 生成下载 / 导入验证）
 - [x] 工程化 统一测试脚本（`scripts/run_tests.sh` 一键跑全部 18 项测试）、框架注册表独立（`backend/registry.py`）、后端/导入支持框架级 `cflags`
 - [x] **应用层测试框架（三层架构）**：驱动层(模拟基座) → 组件层(裸机/KV/文件系统) → 应用层测试框架

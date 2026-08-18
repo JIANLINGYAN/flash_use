@@ -466,12 +466,12 @@ def run_framework_stream(fid, config=None, test_config=None):
         manifest = reg[fid]
         dest = os.path.join(IMPORTS_DIR, fid)
         sim_c = os.path.join(ROOT, "simulator", "flash_sim.c")
-        entry_src = os.path.join(dest, manifest.get("entry", "test_main.c"))
+        entry_src = importer._locate(dest, manifest.get("entry", "test_main.c"))
         srcs = [sim_c, entry_src]
         lib_sources = manifest.get("lib_sources")
         if lib_sources:
             for ls in lib_sources:
-                p = os.path.join(dest, ls)
+                p = importer._locate(dest, ls)
                 if os.path.exists(p):
                     srcs.append(p)
         else:
@@ -479,7 +479,17 @@ def run_framework_stream(fid, config=None, test_config=None):
                 if manifest.get("lib") else None
             if lib_c and os.path.exists(lib_c):
                 srcs.append(lib_c)
-        exe, build = _compile_exe(srcs, [os.path.join(ROOT, "simulator"), dest], fid)
+        incs = [os.path.join(ROOT, "simulator"), dest]
+        incs += [os.path.join(dest, i) for i in manifest.get("includes", [])]
+        # cflags：-include 映射为包内实际路径（-D 原样保留）
+        mflags = manifest.get("cflags", [])
+        mcflags = []
+        for i, a in enumerate(mflags):
+            if a == "-include" and i + 1 < len(mflags):
+                mcflags += ["-include", importer._locate(dest, mflags[i + 1])]
+            elif a.startswith("-D"):
+                mcflags.append(a)
+        exe, build = _compile_exe(srcs, incs, fid, cflags=mcflags)
         workdir = dest
     else:
         fw = get_framework(fid)
@@ -512,7 +522,9 @@ def run_framework_stream(fid, config=None, test_config=None):
         return
 
     yield {"event": "log", "level": "info", "text": "[build] 编译成功，开始运行…"}
-    for ev in _stream_run(exe, workdir, _build_env(fw, config, test_config), fid):
+    for ev in _stream_run(exe, workdir,
+                          _build_env(None if fid in reg else fw,
+                                     config, test_config), fid):
         yield ev
 
 
@@ -528,14 +540,14 @@ def _run_imported(fid, manifest, config=None, test_config=None):
 
     entry = manifest.get("entry", "test_main.c")
     sim_c = os.path.join(ROOT, "simulator", "flash_sim.c")
-    entry_src = os.path.join(dest, entry)
+    entry_src = importer._locate(dest, entry)
 
     compile_srcs = [sim_c, entry_src]
     # 兼容旧导出包（单一 lib 文件）与新导出包（lib_sources 列表）
     lib_sources = manifest.get("lib_sources")
     if lib_sources:
         for ls in lib_sources:
-            p = os.path.join(dest, ls)
+            p = importer._locate(dest, ls)
             if os.path.exists(p):
                 compile_srcs.append(p)
     else:
@@ -550,12 +562,16 @@ def _run_imported(fid, manifest, config=None, test_config=None):
     for i, a in enumerate(mflags):
         if a == "-include" and i + 1 < len(mflags):
             extra.append(a)
-            extra.append(os.path.join(dest, os.path.basename(mflags[i + 1])))
+            extra.append(importer._locate(dest, mflags[i + 1]))
         elif a.startswith("-D"):
             extra.append(a)
     cmd = [gcc, "-std=c99", "-Wall", "-Wextra",
-           "-I" + os.path.join(ROOT, "simulator"), "-I" + dest,
-           "-o", tmp_exe] + extra + compile_srcs
+           "-I" + os.path.join(ROOT, "simulator"), "-I" + dest]
+    for inc in manifest.get("includes", []):
+        p = os.path.join(dest, inc)
+        if os.path.isdir(p):
+            cmd += ["-I", p]
+    cmd += extra + ["-o", tmp_exe] + compile_srcs
 
     build = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
     if build.returncode != 0:
