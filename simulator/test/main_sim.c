@@ -218,6 +218,187 @@ static int self_test_eeprom(flash_dev_t *dev, const flash_config_t *cfg)
     return fails;
 }
 
+/*
+ * 通用测试项: badblock（仅 NAND 有意义）
+ * 验证两类坏块擦除拒绝：
+ *   1) 固定坏块（SIM_BAD_N>0 时初始化随机标记）——擦除被拒绝。
+ *   2) 寿命耗尽块（擦满 erase_cycles 后）——擦除被拒绝。
+ * 需要较小的 erase_cycles 以便快速写满触发。
+ */
+static int self_test_badblock(flash_dev_t *dev, const flash_config_t *cfg)
+{
+    int fails = 0;
+    if (cfg->type != FLASH_TYPE_NAND) {
+        printf("  [SKIP] badblock 仅适用于 NAND，当前类型跳过\n");
+        return 0;
+    }
+    LOG_INFO("通用测试 badblock: 触发并验证坏块擦除拒绝");
+
+    /* 先写满所有块的擦除寿命，使其寿命耗尽退化成坏块 */
+    uint32_t nblocks = cfg->total_size / cfg->erase_size;
+    for (uint32_t b = 0; b < nblocks; b++) {
+        uint32_t off = b * cfg->erase_size;
+        for (uint32_t c = 0; c < cfg->erase_cycles + 1; c++) {
+            if (flash_sim_erase(dev, off, cfg->erase_size) != FLASH_OK) break;
+        }
+    }
+
+    /* 找到一个寿命耗尽块，验证后续擦除被拒绝 */
+    int found = 0;
+    for (uint32_t b = 0; b < nblocks; b++) {
+        uint32_t off = b * cfg->erase_size;
+        uint32_t cnt = 0;
+        if (flash_sim_get_erase_count(dev, off, &cnt) == FLASH_OK
+            && cnt >= cfg->erase_cycles) {
+            fails += check("worn-out block erase (reject)",
+                           flash_sim_erase(dev, off, cfg->erase_size),
+                           FLASH_ERR_ERASE);
+            found = 1;
+            break;
+        }
+    }
+    if (!found) {
+        printf("  [WARN] 未触发寿命耗尽块（可能寿命/容量配置过小）\n");
+    }
+    return fails;
+}
+
+/*
+ * 通用测试项: wear（磨损统计，仅 NOR/NAND）
+ * 对多个不同块执行多轮擦写，验证磨损图（WEARMAP）对应块计数递增
+ * 且最大擦除次数（max_cycles）随之增长。
+ */
+static int self_test_wear(flash_dev_t *dev, const flash_config_t *cfg)
+{
+    int fails = 0;
+    uint32_t nblocks = cfg->total_size / cfg->erase_size;
+    LOG_INFO("通用测试 wear: 对前 4 个块执行多轮擦写验证磨损统计");
+
+    uint32_t before = 0;
+    flash_sim_get_erase_count(dev, 0, &before);
+
+    uint8_t wbuf[16];
+    for (int i = 0; i < 16; i++) wbuf[i] = (uint8_t)(0xB0 + i);
+    uint32_t rounds = 5;
+    for (uint32_t r = 0; r < rounds; r++) {
+        for (uint32_t b = 0; b < 4 && b < nblocks; b++) {
+            uint32_t off = b * cfg->erase_size;
+            if (flash_sim_erase(dev, off, cfg->erase_size) != FLASH_OK) continue;
+            flash_sim_write(dev, off, wbuf, sizeof(wbuf));
+        }
+    }
+
+    uint32_t after = 0;
+    flash_sim_get_erase_count(dev, 0, &after);
+    fails += check("wear count increased",
+                   (after >= before + rounds) ? FLASH_OK : FLASH_ERR_IO,
+                   FLASH_OK);
+
+    flash_stats_t st;
+    flash_sim_get_stats(dev, &st);
+    fails += check("max_cycles grows",
+                   (st.max_erase_cycles >= rounds) ? FLASH_OK : FLASH_ERR_IO,
+                   FLASH_OK);
+
+    printf("  [info] 磨损统计：\n");
+    dump_stats(dev, cfg->erase_cycles);
+    return fails;
+}
+
+/*
+ * 通用测试项: powerloss（掉电重放）
+ * 含义：写入数据后"断电"（释放设备但不擦介质），重新上电（用同一介质文件
+ * 重新初始化）应能读回此前写入的数据，验证持久化语义。
+ * 借鉴 fast_flashdb_table 的掉电重放测试项，下沉到模拟基座层面。
+ * 使用独立介质文件并全程自管设备生命周期，避免与 run_selected 传入的
+ * 主设备冲突（双重释放）。
+ */
+#define POWERLOSS_BIN "powerloss_demo.bin"
+static int self_test_powerloss(const flash_config_t *cfg)
+{
+    int fails = 0;
+    uint8_t wbuf[32];
+    for (int i = 0; i < 32; i++) wbuf[i] = (uint8_t)(0x30 + i);
+    LOG_INFO("通用测试 powerloss: 写入标记数据后模拟断电重放");
+
+    /* 保证从干净介质开始：删除可能残留的旧介质文件 */
+    remove(POWERLOSS_BIN);
+
+    flash_config_t cfg1 = *cfg;
+    cfg1.bin_path = POWERLOSS_BIN;
+    flash_dev_t *dev = flash_sim_init(&cfg1);
+    if (!dev) {
+        printf("  [FAIL] powerloss init failed!\n");
+        return 1;
+    }
+    fails += check("powerloss write before reset",
+                   flash_sim_write(dev, 0, wbuf, sizeof(wbuf)), FLASH_OK);
+    /* 断电：释放设备（介质文件保留） */
+    flash_sim_deinit(dev);
+
+    /* 重新上电：用同一介质文件重新初始化 */
+    flash_config_t cfg2 = *cfg;
+    cfg2.bin_path = POWERLOSS_BIN;
+    flash_dev_t *dev2 = flash_sim_init(&cfg2);
+    if (!dev2) {
+        printf("  [FAIL] powerloss re-init failed!\n");
+        return 1;
+    }
+    uint8_t rbuf[32] = {0};
+    fails += check("powerloss read after reset",
+                   flash_sim_read(dev2, 0, rbuf, sizeof(rbuf)), FLASH_OK);
+    fails += check("powerloss data persisted",
+                   memcmp(wbuf, rbuf, sizeof(wbuf)) == 0 ? FLASH_OK
+                                                         : FLASH_ERR_IO,
+                   FLASH_OK);
+    dump_stats(dev2, cfg->erase_cycles);
+    flash_sim_deinit(dev2);
+    return fails;
+}
+
+/* 依据 SIM_TESTS 选择要执行的通用测试项；为空则执行全部 */
+static int run_selected(flash_dev_t *dev, const flash_config_t *cfg,
+                        const char *tests)
+{
+    int fails = 0;
+    int run_any = 0;
+
+    if (tests == NULL || *tests == '\0' || strstr(tests, "basic") != NULL) {
+        printf("\n[通用测试: basic]\n");
+        if (cfg->type == FLASH_TYPE_EEPROM)
+            fails += self_test_eeprom(dev, cfg);
+        else
+            fails += self_test_block(dev, cfg);
+        run_any = 1;
+    }
+    if (tests == NULL || *tests == '\0' || strstr(tests, "bad") != NULL) {
+        printf("\n[通用测试: badblock]\n");
+        fails += self_test_badblock(dev, cfg);
+        run_any = 1;
+    }
+    if (tests == NULL || *tests == '\0' || strstr(tests, "wear") != NULL) {
+        printf("\n[通用测试: wear]\n");
+        if (cfg->type == FLASH_TYPE_EEPROM)
+            printf("  [SKIP] wear 不适用于 EEPROM，跳过\n");
+        else
+            fails += self_test_wear(dev, cfg);
+        run_any = 1;
+    }
+    if (tests == NULL || *tests == '\0' || strstr(tests, "powerloss") != NULL) {
+        printf("\n[通用测试: powerloss]\n");
+        fails += self_test_powerloss(cfg);
+        run_any = 1;
+    }
+    if (!run_any) {
+        printf("\n[WARN] 未匹配到任何测试项，默认执行 basic\n");
+        if (cfg->type == FLASH_TYPE_EEPROM)
+            fails += self_test_eeprom(dev, cfg);
+        else
+            fails += self_test_block(dev, cfg);
+    }
+    return fails;
+}
+
 int main(void)
 {
     int fails = 0;
@@ -227,43 +408,34 @@ int main(void)
                       : "NOR Flash";
     printf("=== Flash 模拟基座自检 [%s] ===\n", name);
 
-    if (type == FLASH_TYPE_EEPROM) {
-        flash_config_t cfg = build_cfg(FLASH_TYPE_EEPROM, EEPROM_BIN);
-        LOG_INFO("EEPROM 自检: total=%u erase=%u endurance=%u",
-                 cfg.total_size, cfg.erase_size, cfg.erase_cycles);
-        printf("\n[EEPROM]\n");
-        flash_dev_t *dev = flash_sim_init(&cfg);
-        if (!dev) {
-            printf("  [FAIL] EEPROM init failed!\n");
-            LOG_WARN("init 失败，请检查 bin 路径与容量配置");
-            return 1;
-        }
-        LOG_INFO("EEPROM 初始化完成，开始单字节原地改写语义验证");
-        fails += self_test_eeprom(dev, &cfg);
-        flash_sim_deinit(dev);
-        LOG_INFO("EEPROM 自检结束，释放模拟设备");
+    const char *tests = getenv("SIM_TESTS");
+    if (tests && *tests) {
+        LOG_INFO("启用的通用测试项: %s", tests);
     } else {
-        const char *bin = (type == FLASH_TYPE_NAND) ? NAND_BIN : NOR_BIN;
-        flash_config_t cfg = build_cfg(type, bin);
-        LOG_INFO("%s 自检: total=%u erase=%u write=%u endurance=%u bad=%u",
-                 name, cfg.total_size, cfg.erase_size, cfg.write_size,
-                 cfg.erase_cycles, cfg.bad_blocks);
-        printf("\n[%s]\n", name);
-        flash_dev_t *dev = flash_sim_init(&cfg);
-        if (!dev) {
-            printf("  [FAIL] %s init failed!\n", name);
-            LOG_WARN("init 失败，请检查 bin 路径与容量配置");
-            return 1;
-        }
-        LOG_INFO("%s 初始化完成，开始擦除/写/读/位与编程语义验证", name);
-        if (cfg.type == FLASH_TYPE_NAND && cfg.bad_blocks > 0) {
-            LOG_WARN("检测到坏块配置 bad=%u，将验证坏块擦除被拒绝",
-                     cfg.bad_blocks);
-        }
-        fails += self_test_block(dev, &cfg);
-        flash_sim_deinit(dev);
-        LOG_INFO("%s 自检结束，释放模拟设备", name);
+        LOG_INFO("未指定 SIM_TESTS，执行全部通用测试项");
     }
+
+    const char *bin = (type == FLASH_TYPE_NAND) ? NAND_BIN
+                    : (type == FLASH_TYPE_EEPROM) ? EEPROM_BIN
+                    : NOR_BIN;
+    flash_config_t cfg = build_cfg(type, bin);
+    LOG_INFO("%s 自检: total=%u erase=%u write=%u endurance=%u bad=%u bad_r=%u",
+             name, cfg.total_size, cfg.erase_size, cfg.write_size,
+             cfg.erase_cycles, cfg.bad_blocks, cfg.bad_ratio);
+    printf("\n[%s]\n", name);
+
+    flash_dev_t *dev = flash_sim_init(&cfg);
+    if (!dev) {
+        printf("  [FAIL] %s init failed!\n", name);
+        LOG_WARN("init 失败，请检查 bin 路径与容量配置");
+        return 1;
+    }
+    LOG_INFO("%s 初始化完成，开始通用测试项验证", name);
+
+    fails += run_selected(dev, &cfg, tests);
+
+    flash_sim_deinit(dev);
+    LOG_INFO("%s 自检结束，释放模拟设备", name);
 
     printf("\n=== 自检结果: %s ===\n", fails == 0 ? "全部通过" : "存在失败");
     LOG_INFO("自检完成: %s", fails == 0 ? "全部通过" : "存在失败");

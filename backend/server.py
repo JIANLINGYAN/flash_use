@@ -148,6 +148,13 @@ FRAMEWORKS = [
         "workdir": "simulator/test",
         "config_schema": SIM_CONFIG_SCHEMA,
         "test_schema": [],
+        "test_env": {"tests": "SIM_TESTS"},
+        "test_items": [
+            {"id": "basic", "label": "基础擦除/写/读语义"},
+            {"id": "badblock", "label": "坏块拒绝(NAND)"},
+            {"id": "wear", "label": "磨损统计/磨损均衡"},
+            {"id": "powerloss", "label": "掉电重放持久化"},
+        ],
     },
     {
         "id": "kv",
@@ -287,6 +294,57 @@ FRAMEWORKS = [
             {"id": "func", "label": "高频保存压测"},
         ],
     },
+    # ---- fast_flashdb_table（轻量 KV/表组件，用户开源组件）----
+    {
+        "id": "fastflash",
+        "_comment": "用户开源组件 fast_flashdb_table：轻量表存储，仅依赖 flash_ops_t 移植接口；"
+                    "vendor 源码零修改，移植层对接 simulator 模拟基座",
+        "name": "fast_flashdb_table 组件",
+        "desc": "轻量表存储组件，支持建表/按索引读写/追加/删除/GC/掉电重放。对接本平台模拟基座。",
+        "open_source": True,
+        "vendor": "JIANLINGYAN/fast_flashdb_table",
+        "repo": "https://github.com/JIANLINGYAN/fast_flashdb_table",
+        "sources": [
+            "simulator/flash_sim.c",
+            "frameworks/fastflash/vendor/fast_flashdb_table/core/fast_flash_core.c",
+            "frameworks/fastflash/vendor/fast_flashdb_table/core/fast_flash_log.c",
+            "frameworks/fastflash/fastflash_sim_port.c",
+            "frameworks/fastflash/test/main_fastflash.c",
+        ],
+        "includes": [
+            "simulator",
+            "frameworks/fastflash",
+            "frameworks/fastflash/vendor/fast_flashdb_table/core",
+        ],
+        "workdir": "frameworks/fastflash/test",
+        "config_schema": SIM_CONFIG_SCHEMA,
+        "default_env": {
+            "type": "0",          # 0=NOR 1=NAND 2=EEPROM（与模拟基座一致）
+            "total": "64*1024",
+            "erase_size": "4096",
+            "write_size": "1",
+            "read_us": "50",
+            "write_us": "200",
+            "erase_us": "40000",
+            "erase_cycles": "100000",
+            "bad_blocks": "0",
+            "bad_ratio": "0",
+        },
+        "default_config": {"type": 0, "total": 65536, "erase_size": 4096,
+                           "write_size": 1, "read_us": 50, "write_us": 200,
+                           "erase_us": 40000, "erase_cycles": 100000,
+                           "bad_blocks": 0, "bad_ratio": 0},
+        "test_env": {"tests": "FLT_TESTS"},
+        "test_items": [
+            {"id": "init", "label": "初始化/建表"},
+            {"id": "write_read", "label": "基础写入/读取"},
+            {"id": "append", "label": "追加/计数"},
+            {"id": "update", "label": "按索引覆盖"},
+            {"id": "delete", "label": "删除表"},
+            {"id": "gc", "label": "垃圾回收"},
+            {"id": "powerloss", "label": "掉电重放"},
+        ],
+    },
     # 后续框架（fs / ota）在此追加注册即可被前端发现
 ]
 
@@ -340,8 +398,8 @@ def parse_output(text):
     }
 
 
-def _build_env(config, test_config):
-    """根据前端传入的配置构造测试程序的环境变量（注入 SIM_*/KV_*）。
+def _build_env(fw, config, test_config):
+    """根据前端传入的配置构造测试程序的环境变量（注入 SIM_*/KV_*/FLT_* 等）。
 
     数值字段在 schema 默认值=0（"按类型默认"）时不注入环境变量，
     避免被 C 程序当成合法值（如 SIM_TOTAL=0）覆盖自身兜底默认。
@@ -370,6 +428,18 @@ def _build_env(config, test_config):
                                               it.get("n", 0),
                                               it.get("freq", 0)))
                 env[envk] = ";".join(parts)
+            else:
+                env[envk] = str(v)
+    # 通用测试项环境变量映射：各框架注册项通过 test_env 声明
+    # 配置 key -> 环境变量名（如 fastflash: tests -> FLT_TESTS）
+    test_env = (fw or {}).get("test_env")
+    if test_env and test_config:
+        for k, envk in test_env.items():
+            if k not in test_config or test_config[k] == "":
+                continue
+            v = test_config[k]
+            if isinstance(v, list):
+                env[envk] = ",".join(str(x) for x in v)
             else:
                 env[envk] = str(v)
     return env
@@ -416,7 +486,7 @@ def run_framework(fid, config=None, test_config=None):
 
     try:
         t0 = time.time()
-        run = subprocess.run([tmp_exe], cwd=workdir, env=_build_env(config, test_config),
+        run = subprocess.run([tmp_exe], cwd=workdir, env=_build_env(fw, config, test_config),
                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
         elapsed = time.time() - t0
     except subprocess.TimeoutExpired:
@@ -602,7 +672,7 @@ def run_framework_stream(fid, config=None, test_config=None):
         return
 
     yield {"event": "log", "level": "info", "text": "[build] 编译成功，开始运行…"}
-    for ev in _stream_run(exe, workdir, _build_env(config, test_config), fid):
+    for ev in _stream_run(exe, workdir, _build_env(fw, config, test_config), fid):
         yield ev
 
 
@@ -647,7 +717,7 @@ def _run_imported(fid, manifest, config=None, test_config=None):
 
     try:
         t0 = time.time()
-        run = subprocess.run([tmp_exe], cwd=dest, env=_build_env(config, test_config),
+        run = subprocess.run([tmp_exe], cwd=dest, env=_build_env(None, config, test_config),
                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
         elapsed = time.time() - t0
     except subprocess.TimeoutExpired:
