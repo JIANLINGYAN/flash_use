@@ -143,6 +143,7 @@ APP_ADAPTER_MAP = {
     "nvs": "app/adapter/nvs_ad.c",
     "zms": "app/adapter/zms_ad.c",
     "fcb": "app/adapter/fcb_ad.c",
+    "tym_setting": "app/adapter/tym_setting_ad.c",
     "baremetal": "app/adapter/baremetal_ad.c",
     "fs": "app/adapter/fs_store_ad.c",
     "littlefs": "app/adapter/littlefs_ad.c",
@@ -602,6 +603,43 @@ FRAMEWORKS = [
             {"id": "gc", "label": "垃圾回收"},
             {"id": "types", "label": "多类型数据"},
             {"id": "func", "label": "功能压测(条目表)"},
+        ],
+    },
+    # ---- TYM Setting（Tymphany 厂商组件）：ID 静态表 + RAM 镜像 + 延时整页回写。
+    # ---- vendor 经去耦裁剪（去掉 FreeRTOS/ui_shell/hal_log），写放大极大，压测轮数宜小。
+    {
+        "id": "tym_setting",
+        "_comment": "TYM Setting：编译期固定 ID→固定 Flash 地址静态映射 + RAM 全镜像 + "
+                    "延时批量整页回写；无磨损均衡/无 GC/掉电不安全，写放大极大",
+        "name": "TYM Setting (ID静态表/RAM镜像)",
+        "category": CATEGORY_KV,
+        "desc": "Tymphany Setting 极简持久化框架：ID 索引 O(1) 访问，延时批量整页回写。"
+                "适配层以 key hash 映射 eSettingId，每次写入立即落盘。",
+        "sources": [
+            "simulator/flash_sim.c",
+            "frameworks/tym_setting/tym_setting_sim_port.c",
+            "frameworks/tym_setting/vendor/src/app_setting_idle_activity.c",
+            "frameworks/tym_setting/vendor/src/StorageDrv.c",
+            "frameworks/tym_setting/test/main_tym_setting.c",
+        ],
+        "includes": [
+            "simulator",
+            "frameworks/tym_setting",
+            "frameworks/tym_setting/vendor/inc",
+            "frameworks/tym_setting/config",
+            "frameworks/tym_setting/compat",
+        ],
+        "cflags": [],
+        "workdir": "frameworks/tym_setting/test",
+        "config_schema": SIM_CONFIG_SCHEMA,
+        "test_schema": [
+            {"key": "capacity", "label": "Setting 区容量(字节)", "type": "number",
+             "default": 16384, "min": 2048, "step": 1024, "group": "test"},
+        ],
+        "test_items": [
+            {"id": "basic", "label": "基本写入/读取/修改"},
+            {"id": "persist", "label": "延时回写与重启持久化"},
+            {"id": "modify", "label": "修改后再次持久化"},
         ],
     },
     {

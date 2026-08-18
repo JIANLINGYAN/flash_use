@@ -27,8 +27,8 @@ flash_use/
 │   ├── app_util.c/.h     #   环境变量/计时/STATS_JSON 输出
 │   ├── app_task.c/.h     #   任务引擎：write/read/update/durability/powerloss/mixed
 │   ├── adapter/          #   组件适配器（kv_store/easyflash/flashdb/fastflash/
-│   │                     #   nvdm/nvs/zms/fcb/baremetal/fs_store/littlefs/
-│   │                     #   fatfs/spiffs/yaffs）
+│   │                     #   nvdm/nvs/zms/fcb/tym_setting/baremetal/fs_store/
+│   │                     #   littlefs/fatfs/spiffs/yaffs）
 │   └── test/main_app.c   #   统一入口（APP_COMPONENT + APP_TASK 选择）
 ├── frameworks/           # 组件层：存储框架库（对接 simulator，可移植 C）
 │   ├── kv/               #   自研 KV/NVS 框架
@@ -67,6 +67,12 @@ flash_use/
 │   ├── zms/               #   开源组件 Zephyr ZMS（KV/固定槽位存储）
 │   │   ├── vendor/       #     upstream 源码（zms.c，零修改）
 │   │   └── test/main_zms.c
+│   ├── tym_setting/       #   厂商组件 TYM Setting（ID静态表/RAM镜像，去耦裁剪）
+│   │   ├── tym_setting_sim_port.c/.h # 移植层：NvmDrv 回调桥接模拟基座
+│   │   ├── vendor/       #     框架源码（去 FreeRTOS/ui_shell/hal_log 耦合）
+│   │   ├── config/       #     数据契约三表（eSettingId + settingDB + romMap）
+│   │   ├── compat/       #     cplus/commonTypes/日志抽象
+│   │   └── test/main_tym_setting.c
 │   ├── fs/               #   自研文件系统框架（块分配表 + 数据块）
 │   │   ├── fs_store.h/.c #     多文件读写/频繁修改/追加/删除/查询
 │   │   └── test/main_fs.c
@@ -140,13 +146,14 @@ flash_use/
 [PASS] fcb
 [PASS] nvs
 [PASS] zms
+[PASS] tym_setting
 [PASS] fs
 [PASS] littlefs
 [PASS] fatfs
 [PASS] spiffs
 [PASS] yaffs
 ===========================================
-通过 17/17
+通过 18/18
 ```
 
 > 测试脚本复用 `backend/registry.py` 注册表，编译/运行参数与后端
@@ -184,7 +191,7 @@ APP_COMPONENT=kv APP_TASK=durability APP_ITEMS=10 APP_VLEN=32 /tmp/app_kv
 
 | 变量 | 含义 | 默认 |
 |------|------|------|
-| `APP_COMPONENT` | 组件 id（kv/easyflash/flashdb/fastflash/nvdm/nvs/zms/fcb/baremetal/fs/littlefs/fatfs/spiffs/yaffs） | 列出已注册组件 |
+| `APP_COMPONENT` | 组件 id（kv/easyflash/flashdb/fastflash/nvdm/nvs/zms/fcb/tym_setting/baremetal/fs/littlefs/fatfs/spiffs/yaffs） | 列出已注册组件 |
 | `APP_TASK` | write / read / update / durability / powerloss / mixed | durability |
 | `APP_ITEMS` | 数据项数量 | 10 |
 | `APP_VLEN` | 单条数据长度（字节） | 32 |
@@ -269,6 +276,15 @@ gcc -std=c99 -Wall -Wextra -DCONFIG_FLASH_HAS_EXPLICIT_ERASE \
     -Iframeworks/zms/vendor/include \
     -o /tmp/zms simulator/flash_sim.c frameworks/zephyr_compat/zephyr_compat.c \
     frameworks/zms/vendor/zms.c frameworks/zms/test/main_zms.c && /tmp/zms
+
+# TYM Setting（ID静态表/RAM镜像，去耦裁剪）
+gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/tym_setting \
+    -Iframeworks/tym_setting/vendor/inc -Iframeworks/tym_setting/config \
+    -Iframeworks/tym_setting/compat \
+    -o /tmp/tym simulator/flash_sim.c frameworks/tym_setting/tym_setting_sim_port.c \
+    frameworks/tym_setting/vendor/src/app_setting_idle_activity.c \
+    frameworks/tym_setting/vendor/src/StorageDrv.c \
+    frameworks/tym_setting/test/main_tym_setting.c && /tmp/tym
 
 # 自研文件系统框架
 gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/fs \
@@ -390,8 +406,8 @@ gcc -std=c99 -DCONFIG_YAFFS_DIRECT -DCONFIG_YAFFS_DEFINES_TYPES \
 ├──────────────────────────────────────────────────────────────┤
 │ 组件层 (frameworks/)                                          │
 │  裸机简单框架(baremetal)  KV 管理(kv/easyflash/flashdb/       │
-│  fastflash/nvdm/nvs/zms/fcb)  文件系统(fs/littlefs/fatfs/        │
-│  spiffs/yaffs)                                                  │
+│  fastflash/nvdm/nvs/zms/fcb/tym_setting) 文件系统(fs/littlefs/│
+│  fatfs/spiffs/yaffs)                                          │
 │  每个组件 = vendor 源码(零修改) + sim_port 移植层              │
 │        │ 仅调用 flash_sim 统一接口                            │
 ├──────────────────────────────────────────────────────────────┤
@@ -455,17 +471,18 @@ xxx_library.zip
 - [x] 模块二 开源组件 **Zephyr FCB**（闪存环形缓冲：append-only 日志 + 回卷覆盖 + CRC + 掉电恢复），经 Zephyr 兼容层桥接模拟基座运行验证通过
 - [x] 模块二 开源组件 **Zephyr NVS**（KV/裸机持久化：扇区式 ATE 日志 + 掉电安全 + GC），经 Zephyr 兼容层桥接模拟基座运行验证通过
 - [x] 模块二 开源组件 **Zephyr ZMS**（KV/固定槽位存储：磨损均衡 + 掉电安全，定位替代 NVS），经 Zephyr 兼容层桥接模拟基座运行验证通过
+- [x] 模块二 厂商组件 **TYM Setting**（ID 静态表 + RAM 镜像 + 延时整页回写；去 FreeRTOS/ui_shell/hal_log 耦合后经移植层对接模拟基座，写读改/延时回写/重启持久化验证通过）
 - [x] 模块二 自研文件系统框架 **fs_store**（块分配表 + 数据块：多文件创建/读写、单文件频繁修改、追加、删除、查询、掉电重放），模拟基座验证通过
 - [x] 模块二 开源文件系统 **LittleFS**（littlefs-project v2.x：掉电安全 + 磨损均衡），经移植层对接模拟基座运行验证通过
 - [x] 模块二 开源文件系统 **FatFs**（ChaN R0.16：FAT12/16 格式化 + 多文件操作），经扇区读改写移植层对接模拟基座运行验证通过
 - [x] 模块二 开源文件系统 **SPIFFS**（pellepl：SPI NOR 掉电安全 + 垃圾回收），经 HAL 回调移植层对接模拟基座运行验证通过
 - [x] 模块二 开源文件系统 **YAFFS**（YAFFS2 Direct，GPL v2：NAND 日志型 + 检查点 + 磨损均衡），经 chunk+oob 驱动移植层对接模拟基座运行验证通过
-- [x] 模块三 代码生成引擎（导出库包：.c/.h + 移植说明，支持 kv/simulator/easyflash/flashdb/baremetal/nvs/zms/fcb/fs/littlefs/fatfs/spiffs/yaffs）+ 导入闭环校验
+- [x] 模块三 代码生成引擎（导出库包：.c/.h + 移植说明，支持 kv/simulator/easyflash/flashdb/baremetal/nvs/zms/fcb/tym_setting/fs/littlefs/fatfs/spiffs/yaffs）+ 导入闭环校验
 - [x] 模块四 前端模拟运行界面（选框架 / **配置化表单（基座+测试）** / 性能统计卡片 / **磨损柱状图** / 生成下载 / 导入验证）
-- [x] 工程化 统一测试脚本（`scripts/run_tests.sh` 一键跑全部 17 项测试）、框架注册表独立（`backend/registry.py`）、后端/导入支持框架级 `cflags`
+- [x] 工程化 统一测试脚本（`scripts/run_tests.sh` 一键跑全部 18 项测试）、框架注册表独立（`backend/registry.py`）、后端/导入支持框架级 `cflags`
 - [x] **应用层测试框架（三层架构）**：驱动层(模拟基座) → 组件层(裸机/KV/文件系统) → 应用层测试框架
 - [x] **应用层统一任务引擎**（`app/app_task.c`）：write/read/update/durability/powerloss/mixed 六类任务
-- [x] **适配层**（`app/adapter/*`）：14 个组件统一适配为 `app_component_t`，组件源码零修改，支持掉电恢复（APP_REINIT）
+- [x] **适配层**（`app/adapter/*`）：15 个组件统一适配为 `app_component_t`，组件源码零修改，支持掉电恢复（APP_REINIT）
 - [x] **应用层独立性能计算**：吞吐(ops/s, KB/s)、写放大、介质阻塞耗时、磨损分布、数据丢失校验
 - [x] **前端分类展示**：框架按 驱动层/裸机/KV/文件系统 分组；新增「应用层测试」标签页（单组件/批量对比 + 实时性能卡片）
 - [x] **后端应用层接口**：`/api/app/run` 与 `/api/app/run/stream`（SSE 流式），编译配置由 registry `app_layer_for` 推导

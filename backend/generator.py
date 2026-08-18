@@ -351,6 +351,39 @@ RECIPES = {
         "cflags": ["-DCONFIG_FLASH_HAS_EXPLICIT_ERASE"],
         "requires": "flash_sim",
     },
+    # ---- TYM Setting（Tymphany 厂商组件）：ID 静态表 + RAM 镜像 + 整页回写 ----
+    "tym_setting": {
+        "lib_name": "tym_setting",
+        "title": "TYM Setting (ID静态表/RAM镜像)",
+        "desc": "Tymphany Setting：编译期固定 ID→地址静态映射，RAM 全镜像 + 延时批量整页回写。",
+        "src_dir": "frameworks/tym_setting",
+        "copy_files": [
+            "frameworks/tym_setting/tym_setting_sim_port.c",
+            "frameworks/tym_setting/tym_setting_sim_port.h",
+            "frameworks/tym_setting/vendor/src/app_setting_idle_activity.c",
+            "frameworks/tym_setting/vendor/src/StorageDrv.c",
+            "frameworks/tym_setting/vendor/inc/app_setting_idle_activity.h",
+            "frameworks/tym_setting/vendor/inc/SettingSrv_priv.h",
+            "frameworks/tym_setting/vendor/inc/StorageDrv.h",
+            "frameworks/tym_setting/vendor/inc/StorageDrv_priv.h",
+            "frameworks/tym_setting/vendor/inc/NvmDrv.h",
+            "frameworks/tym_setting/vendor/inc/NvmDrv_priv.h",
+            "frameworks/tym_setting/config/setting_id.h",
+            "frameworks/tym_setting/config/SettingSrv.config",
+            "frameworks/tym_setting/compat/cplus.h",
+            "frameworks/tym_setting/compat/commonTypes.h",
+            "frameworks/tym_setting/compat/tym_setting_log.h",
+        ],
+        "test_entry": "frameworks/tym_setting/test/main_tym_setting.c",
+        "extra_includes": [
+            "frameworks/tym_setting",
+            "frameworks/tym_setting/vendor/inc",
+            "frameworks/tym_setting/config",
+            "frameworks/tym_setting/compat",
+        ],
+        "cflags": [],
+        "requires": "flash_sim",
+    },
 }
 
 
