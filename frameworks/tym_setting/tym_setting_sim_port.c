@@ -18,37 +18,37 @@
 #include "NvmDrv_priv.h"
 #include "StorageDrv.h"
 
-#include "flash_sim.h"
+#include "flash_hal.h"
 #include "tym_setting_sim_port.h"
 #include "tym_setting_log.h"
 
 /* ==================== 注入状态 ==================== */
 
-static flash_dev_t *s_dev = NULL;
+static const flash_hal_t *s_hal = NULL;
 static uint32_t s_base_addr = 0;
 static uint32_t s_capacity = 0;
 static uint32_t s_erase_size = 4096;
 
-void tym_setting_sim_setup(flash_dev_t *dev, uint32_t base_addr,
+void tym_setting_sim_setup(const flash_hal_t *hal, uint32_t base_addr,
                            uint32_t capacity, uint32_t erase_size)
 {
-    s_dev = dev;
+    s_hal = hal;
     s_base_addr = base_addr;
     s_capacity = capacity;
     s_erase_size = erase_size;
 }
 
-flash_dev_t *tym_setting_sim_device(void)
+void *tym_setting_sim_device(void)
 {
-    return s_dev;
+    return NULL;   /* 已改为注册式 HAL，介质句柄由测试程序持有 */
 }
 
 int tym_setting_sim_erase_all(void)
 {
-    if (s_dev == NULL || s_capacity == 0) {
+    if (s_hal == NULL || s_capacity == 0) {
         return -1;
     }
-    if (flash_sim_erase(s_dev, s_base_addr, s_capacity) != FLASH_OK) {
+    if (s_hal->erase(s_hal->ctx, s_base_addr, s_capacity) != 0) {
         return -1;
     }
     return 0;
@@ -77,7 +77,7 @@ static bool NvmDrv_WriteData(cStorageDrv *me, uint32 addr, uint8 *pBuf,
                              uint32 sizeInBytes)
 {
     (void)me;
-    if (s_dev == NULL || pBuf == NULL || sizeInBytes == 0) {
+    if (s_hal == NULL || pBuf == NULL || sizeInBytes == 0) {
         return FALSE;
     }
     if (sizeInBytes % 4u != 0u) {
@@ -85,19 +85,19 @@ static bool NvmDrv_WriteData(cStorageDrv *me, uint32 addr, uint8 *pBuf,
               (unsigned long)sizeInBytes);
         return FALSE;
     }
-    return flash_sim_write(s_dev, s_base_addr + addr, pBuf, sizeInBytes)
-               == FLASH_OK ? TRUE : FALSE;
+    return s_hal->write(s_hal->ctx, s_base_addr + addr, pBuf, sizeInBytes)
+               == 0 ? TRUE : FALSE;
 }
 
 static bool NvmDrv_ReadData(cStorageDrv *me, uint32 addr, uint8 *pBuf,
                             uint32 sizeInBytes)
 {
     (void)me;
-    if (s_dev == NULL || pBuf == NULL || sizeInBytes == 0) {
+    if (s_hal == NULL || pBuf == NULL || sizeInBytes == 0) {
         return FALSE;
     }
-    return flash_sim_read(s_dev, s_base_addr + addr, pBuf, sizeInBytes)
-               == FLASH_OK ? TRUE : FALSE;
+    return s_hal->read(s_hal->ctx, s_base_addr + addr, pBuf, sizeInBytes)
+               == 0 ? TRUE : FALSE;
 }
 
 /* 擦除 addr 所在整个 Setting 分区（与 config 的擦除粒度一致） */
@@ -107,15 +107,15 @@ static bool NvmDrv_ErasePage(cStorageDrv *me, uint32 addr)
     uint32_t region_size = s_capacity;
 
     (void)me;
-    if (s_dev == NULL || region_size == 0) {
+    if (s_hal == NULL || region_size == 0) {
         return FALSE;
     }
-    /* 按实际擦除块粒度逐块擦（模拟基座按块擦除） */
+    /* 按实际擦除块粒度逐块擦（HAL 按块擦除） */
     if (addr < region_start || addr >= region_start + region_size) {
         LOG_E("NvmDrv_ErasePage: addr=0x%lx 越界", (unsigned long)addr);
         return FALSE;
     }
-    if (flash_sim_erase(s_dev, region_start, region_size) != FLASH_OK) {
+    if (s_hal->erase(s_hal->ctx, region_start, region_size) != 0) {
         return FALSE;
     }
     return TRUE;
@@ -123,20 +123,20 @@ static bool NvmDrv_ErasePage(cStorageDrv *me, uint32 addr)
 
 bool NvmDrv_WriteWord(uint32 addr, uint32 wData)
 {
-    if (s_dev == NULL) {
+    if (s_hal == NULL) {
         return FALSE;
     }
-    return flash_sim_write(s_dev, s_base_addr + addr, &wData, sizeof(wData))
-               == FLASH_OK ? TRUE : FALSE;
+    return s_hal->write(s_hal->ctx, s_base_addr + addr, &wData, sizeof(wData))
+               == 0 ? TRUE : FALSE;
 }
 
 bool NvmDrv_ReadWord(uint32 addr, uint32 *pReadData)
 {
-    if (s_dev == NULL || pReadData == NULL) {
+    if (s_hal == NULL || pReadData == NULL) {
         return FALSE;
     }
-    return flash_sim_read(s_dev, s_base_addr + addr, pReadData,
-                          sizeof(*pReadData)) == FLASH_OK ? TRUE : FALSE;
+    return s_hal->read(s_hal->ctx, s_base_addr + addr, pReadData,
+                       sizeof(*pReadData)) == 0 ? TRUE : FALSE;
 }
 
 BOOL NvmDrv_EraseAll(cNvmDrv *me)

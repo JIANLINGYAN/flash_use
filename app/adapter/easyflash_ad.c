@@ -14,11 +14,13 @@
 
 #include "app_register.h"
 #include "app_util.h"
+#include "flash_hal_adapter.h"
 #include "ef_port.h"
 
 #define EF_AD_BIN "app_easyflash.bin"
 
 static flash_dev_t *s_dev = NULL;
+static flash_hal_t s_hal;
 static uint32_t s_capacity = 0;
 
 static int ef_init_impl(const app_option_t *opt)
@@ -50,8 +52,9 @@ static int ef_init_impl(const app_option_t *opt)
     if (!app_env_u32("APP_REINIT", 0)) {
         flash_sim_erase(s_dev, 0, s_capacity);
     }
+    flash_hal_from_sim(s_dev, cfg.total_size, cfg.erase_size, cfg.write_size, &s_hal);
 
-    ef_port_setup(s_dev, 0, s_capacity, cfg.erase_size, 0);
+    ef_port_setup(&s_hal, 0, s_capacity, cfg.erase_size, 0);
     if (easyflash_init() != EF_NO_ERR) {
         flash_sim_deinit(s_dev);
         s_dev = NULL;

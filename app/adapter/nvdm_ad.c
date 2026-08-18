@@ -17,6 +17,7 @@
 
 #include "app_register.h"
 #include "app_util.h"
+#include "flash_hal_adapter.h"
 #include "nvdm_sim_port.h"
 
 #define NVDM_AD_BIN "app_nvdm.bin"
@@ -24,6 +25,7 @@
 #define NVDM_AD_ITEM_COUNT 256
 
 static flash_dev_t *s_dev = NULL;
+static flash_hal_t s_hal;
 static uint32_t s_capacity = 0;
 static int s_inited = 0;
 
@@ -61,7 +63,8 @@ static int nvdm_ad_init_impl(const app_option_t *opt)
         flash_sim_erase(s_dev, 0, s_capacity);
     }
 
-    nvdm_sim_setup(s_dev, 0, s_capacity, cfg.erase_size, NVDM_AD_ITEM_COUNT);
+    flash_hal_from_sim(s_dev, cfg.total_size, cfg.erase_size, cfg.write_size, &s_hal);
+    nvdm_sim_setup(&s_hal, 0, s_capacity, cfg.erase_size, NVDM_AD_ITEM_COUNT);
     if (nvdm_init() != NVDM_STATUS_OK) {
         flash_sim_deinit(s_dev);
         s_dev = NULL;

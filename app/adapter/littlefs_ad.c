@@ -15,10 +15,12 @@
 
 #include "app_register.h"
 #include "app_util.h"
+#include "flash_hal_adapter.h"
 
 #define LFS_AD_BIN "app_littlefs.bin"
 
 static flash_dev_t *s_dev = NULL;
+static flash_hal_t s_hal;
 static lfs_t s_lfs;
 static struct lfs_config s_cfg;
 static int s_mounted = 0;
@@ -30,28 +32,41 @@ static int lfs_init_impl(const app_option_t *opt)
     if (!app_env_u32("APP_REINIT", 0)) {
         remove(LFS_AD_BIN);
     }
-    if (littlefs_sim_init_device(LFS_AD_BIN, &s_cfg) != 0) {
+    /* 打开介质 -> 包装为统一 flash_hal_t -> 注册给移植层 */
+    flash_config_t fc;
+    memset(&fc, 0, sizeof(fc));
+    fc.type = FLASH_TYPE_NOR;
+    fc.total_size = 128 * 1024;
+    fc.erase_size = 4096;
+    fc.write_size = 1;
+    fc.erase_cycles = 100000;
+    fc.bin_path = LFS_AD_BIN;
+    s_dev = flash_sim_init(&fc);
+    if (!s_dev) {
         return -1;
     }
-    s_dev = littlefs_sim_device();
+    flash_hal_from_sim(s_dev, fc.total_size, fc.erase_size, fc.write_size, &s_hal);
+    if (littlefs_port_init(&s_hal, 0, &s_cfg) != 0) {
+        return -1;
+    }
 
     int rc = lfs_mount(&s_lfs, &s_cfg);
     if (rc != LFS_ERR_OK) {
         /* 掉电恢复时禁止格式化（介质损坏应报错而非重建） */
         if (app_env_u32("APP_REINIT", 0)) {
-            littlefs_sim_deinit_device();
+            flash_sim_deinit(s_dev);
             s_dev = NULL;
             return -1;
         }
         rc = lfs_format(&s_lfs, &s_cfg);
         if (rc != LFS_ERR_OK) {
-            littlefs_sim_deinit_device();
+            flash_sim_deinit(s_dev);
             s_dev = NULL;
             return -1;
         }
         rc = lfs_mount(&s_lfs, &s_cfg);
         if (rc != LFS_ERR_OK) {
-            littlefs_sim_deinit_device();
+            flash_sim_deinit(s_dev);
             s_dev = NULL;
             return -1;
         }
@@ -67,7 +82,7 @@ static void lfs_deinit_impl(void)
         s_mounted = 0;
     }
     if (s_dev) {
-        littlefs_sim_deinit_device();
+        flash_sim_deinit(s_dev);
         s_dev = NULL;
     }
 }

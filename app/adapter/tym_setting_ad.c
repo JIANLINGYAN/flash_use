@@ -20,11 +20,13 @@
 
 #include "app_register.h"
 #include "app_util.h"
+#include "flash_hal_adapter.h"
 #include "tym_setting_sim_port.h"
 
 #define TYM_AD_BIN "app_tym_setting.bin"
 
 static flash_dev_t *s_dev = NULL;
+static flash_hal_t s_hal;
 static int s_inited = 0;
 
 /*
@@ -84,7 +86,8 @@ static int tym_ad_init_impl(const app_option_t *opt)
         flash_sim_erase(s_dev, 0, capacity);
     }
 
-    tym_setting_sim_setup(s_dev, 0, capacity, cfg.erase_size);
+    flash_hal_from_sim(s_dev, cfg.total_size, cfg.erase_size, cfg.write_size, &s_hal);
+    tym_setting_sim_setup(&s_hal, 0, capacity, cfg.erase_size);
     SettingSrv_Init();
     s_inited = 1;
     return 0;

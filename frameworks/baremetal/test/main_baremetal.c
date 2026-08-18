@@ -19,6 +19,7 @@
  */
 
 #include "bm_config.h"
+#include "flash_hal_adapter.h"
 #include "flash_sim.h"
 
 #include <stdio.h>
@@ -113,6 +114,8 @@ int main(void)
         printf("  Flash 初始化失败!\n");
         return 1;
     }
+    flash_hal_t hal;
+    flash_hal_from_sim(dev, cfg.total_size, cfg.erase_size, cfg.write_size, &hal);
 
     /*
      * 分区规划：A/B 各占一个擦除块，紧邻放置（真实工程中通常放在
@@ -135,9 +138,9 @@ int main(void)
     /* 初始状态：擦除两分区，模拟出厂空白 Flash */
     flash_sim_erase(dev, base_a, part_size * 2u);
 
-    flash_err_t rc = bm_config_init(&ctx, dev, base_a, base_b, part_size,
-                                    (uint32_t)sizeof(app_config_t));
-    if (rc != FLASH_OK) {
+    int rc = bm_config_init(&ctx, &hal, base_a, base_b, part_size,
+                            (uint32_t)sizeof(app_config_t));
+    if (rc != 0) {
         printf("  [FAIL] bm_config_init 失败 (rc=%d)\n", rc);
         flash_sim_deinit(dev);
         return 1;
@@ -231,7 +234,7 @@ int main(void)
 
         /* 重新上电扫描 */
         bm_config_t ctx2;
-        bm_config_init(&ctx2, dev, base_a, base_b, part_size,
+        bm_config_init(&ctx2, &hal, base_a, base_b, part_size,
                        (uint32_t)sizeof(app_config_t));
         memset(&back, 0, sizeof(back));
         expect("掉电后仍能读到配置",
@@ -266,10 +269,10 @@ int main(void)
                         sizeof(zero));
 
         bm_config_t ctx3;
-        bm_config_init(&ctx3, dev, base_a, base_b, part_size,
+        bm_config_init(&ctx3, &hal, base_a, base_b, part_size,
                        (uint32_t)sizeof(app_config_t));
         memset(&back, 0, sizeof(back));
-        flash_err_t lr = bm_config_load(&ctx3, &back);
+        int lr = bm_config_load(&ctx3, &back);
         expect("损坏后仍能加载（回退到备份）", lr == FLASH_OK);
         expect("回退到较旧但完好的那份", back.boot_count == 1000);
     }

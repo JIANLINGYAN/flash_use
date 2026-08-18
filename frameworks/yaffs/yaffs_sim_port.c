@@ -17,7 +17,6 @@
  */
 
 #include "yaffs_sim_port.h"
-#include "flash_sim.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -46,8 +45,8 @@ int yaffsfs_GetLastError(void)
     return s_last_error;
 }
 
-/* 全局模拟设备句柄（由 yaffs_sim_init_device 建立） */
-static flash_dev_t *g_sim_dev = NULL;
+/* 注册的 HAL 实例（由 yaffs_port_init 注册） */
+static const flash_hal_t *s_hal = NULL;
 
 /* YAFFS 设备（静态单实例） */
 static struct yaffs_dev g_yaffs_dev;
@@ -106,7 +105,7 @@ void yaffs_bug_fn(const char *file_name, int line_no)
 static int drv_initialise(struct yaffs_dev *dev)
 {
     (void)dev;
-    return YAFFS_OK;   /* 介质已在 yaffs_sim_init_device 打开 */
+    return s_hal ? YAFFS_OK : YAFFS_FAIL;   /* 介质已在 yaffs_port_init 注册 */
 }
 
 static int drv_deinitialise(struct yaffs_dev *dev)
@@ -123,14 +122,13 @@ static int drv_write_chunk(struct yaffs_dev *dev, int nand_chunk,
     uint32_t base = (uint32_t)nand_chunk
                     * (YAFFS_SIM_CHUNK_BYTES + YAFFS_SIM_SPARE_BYTES);
     if (data && data_len > 0) {
-        if (flash_sim_write(g_sim_dev, base, data, (uint32_t)data_len)
-            != FLASH_OK) {
+        if (s_hal->write(s_hal->ctx, base, data, (uint32_t)data_len) != 0) {
             return YAFFS_FAIL;
         }
     }
     if (oob && oob_len > 0) {
-        if (flash_sim_write(g_sim_dev, base + YAFFS_SIM_CHUNK_BYTES,
-                            oob, (uint32_t)oob_len) != FLASH_OK) {
+        if (s_hal->write(s_hal->ctx, base + YAFFS_SIM_CHUNK_BYTES,
+                         oob, (uint32_t)oob_len) != 0) {
             return YAFFS_FAIL;
         }
     }
@@ -146,14 +144,13 @@ static int drv_read_chunk(struct yaffs_dev *dev, int nand_chunk,
     uint32_t base = (uint32_t)nand_chunk
                     * (YAFFS_SIM_CHUNK_BYTES + YAFFS_SIM_SPARE_BYTES);
     if (data && data_len > 0) {
-        if (flash_sim_read(g_sim_dev, base, data, (uint32_t)data_len)
-            != FLASH_OK) {
+        if (s_hal->read(s_hal->ctx, base, data, (uint32_t)data_len) != 0) {
             return YAFFS_FAIL;
         }
     }
     if (oob && oob_len > 0) {
-        if (flash_sim_read(g_sim_dev, base + YAFFS_SIM_CHUNK_BYTES,
-                           oob, (uint32_t)oob_len) != FLASH_OK) {
+        if (s_hal->read(s_hal->ctx, base + YAFFS_SIM_CHUNK_BYTES,
+                        oob, (uint32_t)oob_len) != 0) {
             return YAFFS_FAIL;
         }
     }
@@ -167,7 +164,7 @@ static int drv_erase_block(struct yaffs_dev *dev, int block_no)
 {
     (void)dev;
     uint32_t addr = (uint32_t)block_no * s_block_bytes;
-    if (flash_sim_erase(g_sim_dev, addr, s_block_bytes) != FLASH_OK) {
+    if (s_hal->erase(s_hal->ctx, addr, s_block_bytes) != 0) {
         return YAFFS_FAIL;
     }
     return YAFFS_OK;
@@ -190,42 +187,17 @@ static int drv_check_bad(struct yaffs_dev *dev, int block_no)
 
 /* ---------------- 设备启动 ---------------- */
 
-int yaffs_sim_init_device(const char *bin_path)
+int yaffs_port_init(const flash_hal_t *hal)
 {
-    flash_config_t fc;
-    memset(&fc, 0, sizeof(fc));
-    fc.bin_path = bin_path ? bin_path : "yaffs_sim.bin";
-    FLASH_CFG_DEFAULTS_BY_TYPE(fc, FLASH_TYPE_NOR);
-
-    const char *v;
-#define ENV_LONG(K, D) (((v) = getenv(K)) && *v ? (uint32_t)atol(v) : (D))
-    fc.type         = (flash_type_t)ENV_LONG("SIM_TYPE", FLASH_TYPE_NOR);
-    fc.total_size   = ENV_LONG("SIM_TOTAL", YAFFS_SIM_BLOCKS
-                               * YAFFS_SIM_CHUNKS_PER_BLOCK
-                               * (YAFFS_SIM_CHUNK_BYTES + YAFFS_SIM_SPARE_BYTES));
-    fc.erase_size   = ENV_LONG("SIM_ERASE", YAFFS_SIM_CHUNKS_PER_BLOCK
-                               * (YAFFS_SIM_CHUNK_BYTES + YAFFS_SIM_SPARE_BYTES));
-    fc.write_size   = ENV_LONG("SIM_WRITE", 1);
-    fc.erase_cycles = ENV_LONG("SIM_CYCLES", 100000);
-    fc.read_us      = ENV_LONG("SIM_RD_US", 0);
-    fc.write_us     = ENV_LONG("SIM_WR_US", 0);
-    fc.erase_us     = ENV_LONG("SIM_ERASE_US", 0);
-    fc.bad_blocks   = ENV_LONG("SIM_BAD_N", 0);
-    fc.bad_ratio    = ENV_LONG("SIM_BAD_R", 0);
-#undef ENV_LONG
-
-    if (g_sim_dev) { flash_sim_deinit(g_sim_dev); g_sim_dev = NULL; }
-    g_sim_dev = flash_sim_init(&fc);
-    if (!g_sim_dev) { return -1; }
-
-    s_block_bytes = fc.erase_size;
-    s_media_total = fc.total_size;
+    if (!hal) { return -1; }
+    s_hal = hal;
+    s_block_bytes = hal->erase_size;
+    s_media_total = hal->total_size;
 
     /* 保证介质几何与 YAFFS 布局一致 */
     if (s_block_bytes != YAFFS_SIM_CHUNKS_PER_BLOCK
                          * (YAFFS_SIM_CHUNK_BYTES + YAFFS_SIM_SPARE_BYTES)) {
-        flash_sim_deinit(g_sim_dev);
-        g_sim_dev = NULL;
+        s_hal = NULL;
         return -2;
     }
     return 0;
@@ -265,10 +237,10 @@ int yaffs_sim_start_up(void)
 
 void yaffs_sim_deinit_device(void)
 {
-    if (g_sim_dev) { flash_sim_deinit(g_sim_dev); g_sim_dev = NULL; }
+    s_hal = NULL;
 }
 
 struct flash_dev *yaffs_sim_device(void)
 {
-    return g_sim_dev;
+    return NULL;   /* 已改为注册式 HAL，介质句柄由测试程序持有 */
 }

@@ -131,16 +131,17 @@ def import_zip(zip_bytes):
         zf.close()
         return False, {"error": "manifest.json 解析失败"}
 
-    if manifest.get("requires") != "flash_sim":
+    requires = manifest.get("requires")
+    if requires not in ("flash_sim", "flash_hal"):
         zf.close()
-        return False, {"error": "该库未声明依赖模拟基座(requires=flash_sim)，不符合使用要求"}
+        return False, {"error": "该库未声明依赖统一 HAL 契约(requires=flash_hal/flash_sim)，不符合使用要求"}
 
     entry = manifest.get("entry", "test_main.c")
     if entry not in flat:
         zf.close()
         return False, {"error": "缺少编译入口 %s" % entry}
 
-    # 2) 校验源码依赖 flash_sim.h
+    # 2) 校验源码依赖统一 HAL 契约（flash_hal.h 或旧版 flash_sim.h）
     depends = False
     for r, orig in flat.items():
         if r.endswith(".c") or r.endswith(".h"):
@@ -148,12 +149,12 @@ def import_zip(zip_bytes):
                 txt = zf.read(orig).decode("utf-8", "ignore")
             except Exception:
                 continue
-            if '#include "flash_sim.h"' in txt:
+            if '#include "flash_hal.h"' in txt or '#include "flash_sim.h"' in txt:
                 depends = True
                 break
     if not depends:
         zf.close()
-        return False, {"error": "库源码未发现 #include \"flash_sim.h\"，不符合模拟基座接口要求"}
+        return False, {"error": "库源码未发现 #include \"flash_hal.h\"（或旧版 flash_sim.h），不符合统一 HAL 契约要求"}
 
     # 3) 落地到 imports/<id>/（保留子目录结构）
     fid = manifest.get("id") or ("import_%d" % abs(hash(entry)))
@@ -168,14 +169,17 @@ def import_zip(zip_bytes):
             f.write(zf.read(orig))
     zf.close()
 
-    # 4) 编译运行校验（链接 simulator）
-    sim_c = os.path.join(ROOT, "simulator", "flash_sim.c")
-    if not os.path.exists(sim_c):
-        shutil.rmtree(dest, ignore_errors=True)
-        return False, {"error": "模拟基座源文件缺失，无法编译"}
-
+    # 4) 编译运行校验
+    #    - flash_hal（新契约）：包自带 core/flash_hal_mem.c 内存 HAL，自包含，不链接平台代码；
+    #    - flash_sim（旧契约）：链接平台 simulator/flash_sim.c。
     entry_src = _locate(dest, entry)
-    compile_srcs = [sim_c, entry_src]
+    compile_srcs = [entry_src]
+    if requires == "flash_sim":
+        sim_c = os.path.join(ROOT, "simulator", "flash_sim.c")
+        if not os.path.exists(sim_c):
+            shutil.rmtree(dest, ignore_errors=True)
+            return False, {"error": "模拟基座源文件缺失，无法编译"}
+        compile_srcs.insert(0, sim_c)
     # 兼容旧导出包（单一 lib 文件）与新导出包（lib_sources 列表）
     lib_sources = manifest.get("lib_sources")
     if lib_sources:
@@ -189,8 +193,9 @@ def import_zip(zip_bytes):
         if lib_c and os.path.exists(lib_c):
             compile_srcs.append(lib_c)
 
-    cmd = [gcc, "-std=c99", "-Wall", "-Wextra",
-           "-I" + os.path.join(ROOT, "simulator"), "-I" + dest]
+    cmd = [gcc, "-std=c99", "-Wall", "-Wextra", "-I" + dest]
+    if requires == "flash_sim":
+        cmd += ["-I" + os.path.join(ROOT, "simulator")]
     # 新导出包的 include 目录（manifest.includes，相对包根）
     for inc in manifest.get("includes", []):
         p = os.path.join(dest, inc)

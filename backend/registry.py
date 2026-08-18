@@ -849,9 +849,40 @@ FRAMEWORKS = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# 统一 HAL 契约（平台无关）：
+#   1. 所有框架只依赖 frameworks/common/flash_hal.h；
+#   2. 平台内测试/应用层通过 simulator/flash_hal_adapter.c 把模拟基座
+#      （flash_sim）桥接为 flash_hal_t 后注册给框架。
+# 因此在 get_framework() 中统一注入 include 目录与适配器源码，避免在
+# 每个框架的 sources/includes 里重复书写。
+# ---------------------------------------------------------------------------
+HAL_CONTRACT_INCLUDE = "frameworks/common"     # flash_hal.h
+HAL_ADAPTER_SOURCE = "simulator/flash_hal_adapter.c"
+
+
 def get_framework(fid):
-    """按 id 查找框架注册项；未找到返回 None。"""
-    for f in FRAMEWORKS:
-        if f["id"] == fid:
-            return f
-    return None
+    """按 id 查找框架注册项；未找到返回 None。
+
+    返回前统一注入统一 HAL 契约依赖（include + 适配器源文件），
+    保证所有框架（除模拟基座自身）都能按"注册式 HAL"编译。
+    """
+    f = None
+    for x in FRAMEWORKS:
+        if x["id"] == fid:
+            f = x
+            break
+    if f is None:
+        return None
+    # 深拷贝，避免污染全局注册表
+    fw = dict(f)
+    fw["sources"] = list(f.get("sources", []))
+    fw["includes"] = list(f.get("includes", []))
+    fw["cflags"] = list(f.get("cflags", []))
+    if fid != "simulator":
+        if HAL_CONTRACT_INCLUDE not in fw["includes"]:
+            fw["includes"].append(HAL_CONTRACT_INCLUDE)
+        if HAL_ADAPTER_SOURCE not in fw["sources"]:
+            # 适配器放 flash_sim.c 之后、其它源之前均可
+            fw["sources"].append(HAL_ADAPTER_SOURCE)
+    return fw

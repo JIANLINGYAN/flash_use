@@ -465,9 +465,10 @@ def run_framework_stream(fid, config=None, test_config=None):
     if fid in reg:
         manifest = reg[fid]
         dest = os.path.join(IMPORTS_DIR, fid)
-        sim_c = os.path.join(ROOT, "simulator", "flash_sim.c")
         entry_src = importer._locate(dest, manifest.get("entry", "test_main.c"))
-        srcs = [sim_c, entry_src]
+        srcs = [entry_src]
+        if manifest.get("requires", "flash_sim") == "flash_sim":
+            srcs.insert(0, os.path.join(ROOT, "simulator", "flash_sim.c"))
         lib_sources = manifest.get("lib_sources")
         if lib_sources:
             for ls in lib_sources:
@@ -479,7 +480,9 @@ def run_framework_stream(fid, config=None, test_config=None):
                 if manifest.get("lib") else None
             if lib_c and os.path.exists(lib_c):
                 srcs.append(lib_c)
-        incs = [os.path.join(ROOT, "simulator"), dest]
+        incs = [dest]
+        if manifest.get("requires", "flash_sim") == "flash_sim":
+            incs.insert(0, os.path.join(ROOT, "simulator"))
         incs += [os.path.join(dest, i) for i in manifest.get("includes", [])]
         # cflags：-include 映射为包内实际路径（-D 原样保留）
         mflags = manifest.get("cflags", [])
@@ -539,10 +542,13 @@ def _run_imported(fid, manifest, config=None, test_config=None):
         return {"success": False, "error": "导入框架目录缺失: %s" % fid, "lines": []}
 
     entry = manifest.get("entry", "test_main.c")
-    sim_c = os.path.join(ROOT, "simulator", "flash_sim.c")
     entry_src = importer._locate(dest, entry)
 
-    compile_srcs = [sim_c, entry_src]
+    compile_srcs = [entry_src]
+    # 旧契约（flash_sim）才链接平台模拟基座；新契约（flash_hal）包自包含
+    if manifest.get("requires", "flash_sim") == "flash_sim":
+        sim_c = os.path.join(ROOT, "simulator", "flash_sim.c")
+        compile_srcs.insert(0, sim_c)
     # 兼容旧导出包（单一 lib 文件）与新导出包（lib_sources 列表）
     lib_sources = manifest.get("lib_sources")
     if lib_sources:
@@ -565,8 +571,9 @@ def _run_imported(fid, manifest, config=None, test_config=None):
             extra.append(importer._locate(dest, mflags[i + 1]))
         elif a.startswith("-D"):
             extra.append(a)
-    cmd = [gcc, "-std=c99", "-Wall", "-Wextra",
-           "-I" + os.path.join(ROOT, "simulator"), "-I" + dest]
+    cmd = [gcc, "-std=c99", "-Wall", "-Wextra", "-I" + dest]
+    if manifest.get("requires", "flash_sim") == "flash_sim":
+        cmd += ["-I" + os.path.join(ROOT, "simulator")]
     for inc in manifest.get("includes", []):
         p = os.path.join(dest, inc)
         if os.path.isdir(p):

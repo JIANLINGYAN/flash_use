@@ -1,7 +1,7 @@
 /**
- * kv_store.c - 简易 KV 存储逻辑框架实现
+ * kv_store.c - 简易 KV 存储逻辑框架实现（平台无关）
  *
- * 依赖：flash_sim.h 提供的统一介质接口（read/write/erase）。
+ * 依赖：flash_hal.h 提供的统一注册接口（hal->read/write/erase）。
  * 存储介质：NOR Flash 或 EEPROM 均可（EEPROM 无需 erase，逻辑自动适配）。
  *
  * 掉电安全模型：每条记录末尾一个状态字节，先写数据(PENDING)再写状态
@@ -43,7 +43,7 @@ static uint32_t crc32_calc(const uint8_t *buf, uint32_t len)
 }
 
 /* ---------- 运行期上下文 ---------- */
-static flash_dev_t *s_dev = NULL;
+static const flash_hal_t *s_hal = NULL;
 static uint32_t s_base = 0;
 static uint32_t s_size = 0;
 static uint32_t s_write_cursor = 0;   /* 下一笔可写偏移（相对 base） */
@@ -59,21 +59,21 @@ static uint32_t rec_total(uint16_t len)
 }
 
 /* 读取某条记录（起始 off、value 长度 len）末尾的状态字节 */
-static flash_err_t read_state(uint32_t off, uint16_t len, uint8_t *st)
+static int read_state(uint32_t off, uint16_t len, uint8_t *st)
 {
     uint32_t state_off = s_base + off + sizeof(kv_header_t) + (uint32_t)len;
-    return flash_sim_read(s_dev, state_off, st, 1);
+    return s_hal->read(s_hal->ctx, state_off, st, 1);
 }
 
 /* 扫描整个 KV 区域，重建索引与写入游标（掉电安全加载） */
-static flash_err_t scan_region(void)
+static int scan_region(void)
 {
     s_write_cursor = 0;
     uint32_t off = 0;
     while (off + KV_REC_OVERHEAD <= s_size) {
         kv_header_t hdr;
-        flash_err_t rc = flash_sim_read(s_dev, s_base + off, &hdr, sizeof(hdr));
-        if (rc != FLASH_OK) { return rc; }
+        int rc = s_hal->read(s_hal->ctx, s_base + off, &hdr, sizeof(hdr));
+        if (rc != 0) { return rc; }
 
         if (hdr.magic != KV_MAGIC) {
             /* 非记录起始：通常意味着已到空白区（0xFF），停止扫描 */
@@ -82,7 +82,7 @@ static flash_err_t scan_region(void)
 
         uint8_t st = KV_STATE_ERASED;
         rc = read_state(off, hdr.len, &st);
-        if (rc != FLASH_OK) { return rc; }
+        if (rc != 0) { return rc; }
 
         if (st != KV_STATE_COMMITTED) {
             /* PENDING 或 ERASED：掉电中断的残记录，跳过且不视为有效 */
@@ -105,8 +105,8 @@ static flash_err_t scan_region(void)
             continue;
         }
         uint8_t val[KV_MAX_VALUE];
-        rc = flash_sim_read(s_dev, s_base + off + sizeof(kv_header_t), val, hdr.len);
-        if (rc != FLASH_OK) { return rc; }
+        rc = s_hal->read(s_hal->ctx, s_base + off + sizeof(kv_header_t), val, hdr.len);
+        if (rc != 0) { return rc; }
         uint32_t crc = crc32_calc(val, hdr.len);
         if (crc == hdr.crc) {
             /* 有效记录：索引由"后写覆盖"自然形成——读取时总是取最后一次 */
@@ -116,11 +116,11 @@ static flash_err_t scan_region(void)
         s_write_cursor = off;
         s_used_bytes += total;
     }
-    return FLASH_OK;
+    return 0;
 }
 
 /* 压实：擦除整个 KV 区，把当前有效记录重写到头部（演示 GC + 磨损均衡） */
-static flash_err_t compact(void)
+static int compact(void)
 {
     /* 先收集当前有效记录（key -> 最新值） */
     /* 简化实现：重新扫描，得到有效集（用 key 数组保留最新） */
@@ -131,10 +131,10 @@ static flash_err_t compact(void)
     uint32_t off = 0;
     while (off + KV_REC_OVERHEAD <= s_size) {
         kv_header_t hdr;
-        if (flash_sim_read(s_dev, s_base + off, &hdr, sizeof(hdr)) != FLASH_OK) break;
+        if (s_hal->read(s_hal->ctx, s_base + off, &hdr, sizeof(hdr)) != 0) break;
         if (hdr.magic != KV_MAGIC) break;
         uint8_t st = KV_STATE_ERASED;
-        if (read_state(off, hdr.len, &st) != FLASH_OK) break;
+        if (read_state(off, hdr.len, &st) != 0) break;
         if (st != KV_STATE_COMMITTED) { off += rec_total(hdr.len); continue; }
         if (hdr.len > KV_MAX_VALUE) { off += rec_total(hdr.len); continue; }
         uint8_t val[KV_MAX_VALUE];
@@ -142,7 +142,7 @@ static flash_err_t compact(void)
         if (hdr.len == 0) {
             crc = crc32_calc(val, 0);
         } else {
-            if (flash_sim_read(s_dev, s_base + off + sizeof(hdr), val, hdr.len) != FLASH_OK) break;
+            if (s_hal->read(s_hal->ctx, s_base + off + sizeof(hdr), val, hdr.len) != 0) break;
             crc = crc32_calc(val, hdr.len);
         }
         if (crc != hdr.crc) { off += rec_total(hdr.len); continue; }
@@ -162,42 +162,42 @@ static flash_err_t compact(void)
     }
 
     /* 擦除整个 KV 区（要求 base/size 块对齐） */
-    flash_err_t rc = flash_sim_erase(s_dev, s_base, s_size);
-    if (rc != FLASH_OK && rc != FLASH_ERR_NOTSUP) { return rc; }
+    int rc = s_hal->erase(s_hal->ctx, s_base, s_size);
+    if (rc != 0 && rc != FLASH_HAL_ERR_NOTSUP) { return rc; }
 
     /* 重写有效记录（EEPROM 无需擦除，直接覆盖写，此处 erase 被忽略） */
     s_write_cursor = 0;
     s_used_bytes = 0;
     for (uint32_t i = 0; i < nvalid; i++) {
-        rc = kv_write(s_dev, valid[i].key, valid[i].val, valid[i].len);
-        if (rc != FLASH_OK) { return rc; }
+        rc = kv_write(s_hal, valid[i].key, valid[i].val, valid[i].len);
+        if (rc != 0) { return rc; }
     }
-    return FLASH_OK;
+    return 0;
 }
 
-flash_err_t kv_init(flash_dev_t *dev, uint32_t base, uint32_t size)
+int kv_init(const flash_hal_t *hal, uint32_t base, uint32_t size)
 {
-    if (!dev || size == 0) { return FLASH_ERR_ARGS; }
-    s_dev = dev;
+    if (!hal || size == 0) { return FLASH_HAL_ERR_ARGS; }
+    s_hal = hal;
     s_base = base;
     s_size = size;
     s_used_bytes = 0;
     return scan_region();
 }
 
-flash_err_t kv_write(flash_dev_t *dev, uint16_t key_id,
-                     const void *value, uint16_t len)
+int kv_write(const flash_hal_t *hal, uint16_t key_id,
+             const void *value, uint16_t len)
 {
-    if (!dev || dev != s_dev) { return FLASH_ERR_ARGS; }
-    if (key_id == 0 || len > KV_MAX_VALUE) { return FLASH_ERR_ARGS; }
+    if (!hal || hal != s_hal) { return FLASH_HAL_ERR_ARGS; }
+    if (key_id == 0 || len > KV_MAX_VALUE) { return FLASH_HAL_ERR_ARGS; }
 
     uint32_t total = rec_total(len);
 
     /* 空间不足：尝试压实回收，再判一次 */
     if (s_write_cursor + total > s_size) {
-        flash_err_t rc = compact();
-        if (rc != FLASH_OK) { return rc; }
-        if (s_write_cursor + total > s_size) { return FLASH_ERR_RANGE; }
+        int rc = compact();
+        if (rc != 0) { return rc; }
+        if (s_write_cursor + total > s_size) { return FLASH_HAL_ERR_RANGE; }
     }
 
     uint32_t off = s_write_cursor;
@@ -208,27 +208,27 @@ flash_err_t kv_write(flash_dev_t *dev, uint16_t key_id,
     hdr.crc = crc32_calc((const uint8_t *)value, len);
 
     /* 第一步：写头部 + value（状态字节保持 ERASED=0xFF，即 PENDING 表象） */
-    flash_err_t rc = flash_sim_write(s_dev, s_base + off, &hdr, sizeof(hdr));
-    if (rc != FLASH_OK) { return rc; }
+    int rc = s_hal->write(s_hal->ctx, s_base + off, &hdr, sizeof(hdr));
+    if (rc != 0) { return rc; }
     if (len > 0) {
-        rc = flash_sim_write(s_dev, s_base + off + sizeof(hdr), value, len);
-        if (rc != FLASH_OK) { return rc; }
+        rc = s_hal->write(s_hal->ctx, s_base + off + sizeof(hdr), value, len);
+        if (rc != 0) { return rc; }
     }
 
     /* 第二步：写状态字节为 COMMITTED（原子生效点） */
     uint8_t committed = KV_STATE_COMMITTED;
-    rc = flash_sim_write(s_dev, s_base + off + sizeof(hdr) + len, &committed, 1);
-    if (rc != FLASH_OK) { return rc; }
+    rc = s_hal->write(s_hal->ctx, s_base + off + sizeof(hdr) + len, &committed, 1);
+    if (rc != 0) { return rc; }
 
     s_write_cursor += total;
     s_used_bytes += total;
-    return FLASH_OK;
+    return 0;
 }
 
-flash_err_t kv_read(flash_dev_t *dev, uint16_t key_id,
-                    void *value, uint16_t *len)
+int kv_read(const flash_hal_t *hal, uint16_t key_id,
+            void *value, uint16_t *len)
 {
-    if (!dev || dev != s_dev || !len) { return FLASH_ERR_ARGS; }
+    if (!hal || hal != s_hal || !len) { return FLASH_HAL_ERR_ARGS; }
 
     /* 线性扫描，取最后一条 COMMITTED 且 CRC 通过的同名记录 */
     uint8_t *out = (uint8_t *)value;
@@ -239,10 +239,10 @@ flash_err_t kv_read(flash_dev_t *dev, uint16_t key_id,
 
     while (off + KV_REC_OVERHEAD <= s_size) {
         kv_header_t hdr;
-        if (flash_sim_read(s_dev, s_base + off, &hdr, sizeof(hdr)) != FLASH_OK) break;
+        if (s_hal->read(s_hal->ctx, s_base + off, &hdr, sizeof(hdr)) != 0) break;
         if (hdr.magic != KV_MAGIC) break;
         uint8_t st = KV_STATE_ERASED;
-        if (read_state(off, hdr.len, &st) != FLASH_OK) break;
+        if (read_state(off, hdr.len, &st) != 0) break;
         if (st != KV_STATE_COMMITTED) { off += rec_total(hdr.len); continue; }
         if (hdr.key_id != key_id) { off += rec_total(hdr.len); continue; }
         if (hdr.len > KV_MAX_VALUE) { off += rec_total(hdr.len); continue; }
@@ -251,7 +251,7 @@ flash_err_t kv_read(flash_dev_t *dev, uint16_t key_id,
         if (hdr.len == 0) {
             crc_calc = crc32_calc(val, 0); /* 空值 CRC，与写入端一致 */
         } else {
-            if (flash_sim_read(s_dev, s_base + off + sizeof(hdr), val, hdr.len) != FLASH_OK) break;
+            if (s_hal->read(s_hal->ctx, s_base + off + sizeof(hdr), val, hdr.len) != 0) break;
             crc_calc = crc32_calc(val, hdr.len);
         }
         if (crc_calc != hdr.crc) { off += rec_total(hdr.len); continue; }
@@ -268,20 +268,20 @@ flash_err_t kv_read(flash_dev_t *dev, uint16_t key_id,
         off += rec_total(hdr.len);
     }
 
-    if (!found) { return FLASH_ERR_ARGS; }
+    if (!found) { return FLASH_HAL_ERR_ARGS; }
 
     if (out != NULL) {
-        if (*len < found_len) { return FLASH_ERR_RANGE; }
+        if (*len < found_len) { return FLASH_HAL_ERR_RANGE; }
         memcpy(out, found_val, found_len);
     }
     *len = found_len;
-    return FLASH_OK;
+    return 0;
 }
 
-flash_err_t kv_delete(flash_dev_t *dev, uint16_t key_id)
+int kv_delete(const flash_hal_t *hal, uint16_t key_id)
 {
     /* 写一条 len=0 的 COMMITTED 记录，使后续读取取到空值即"已删除" */
-    return kv_write(dev, key_id, NULL, 0);
+    return kv_write(hal, key_id, NULL, 0);
 }
 
 uint32_t kv_used_bytes(void)
@@ -289,9 +289,9 @@ uint32_t kv_used_bytes(void)
     return s_used_bytes;
 }
 
-flash_err_t kv_summary(flash_dev_t *dev, kv_summary_t *sum)
+int kv_summary(const flash_hal_t *hal, kv_summary_t *sum)
 {
-    if (!dev || dev != s_dev || !sum) { return FLASH_ERR_ARGS; }
+    if (!hal || hal != s_hal || !sum) { return FLASH_HAL_ERR_ARGS; }
     sum->valid_entries = 0;
     sum->total_records = 0;
 
@@ -299,10 +299,10 @@ flash_err_t kv_summary(flash_dev_t *dev, kv_summary_t *sum)
     uint32_t off = 0;
     while (off + KV_REC_OVERHEAD <= s_size) {
         kv_header_t hdr;
-        if (flash_sim_read(s_dev, s_base + off, &hdr, sizeof(hdr)) != FLASH_OK) break;
+        if (s_hal->read(s_hal->ctx, s_base + off, &hdr, sizeof(hdr)) != 0) break;
         if (hdr.magic != KV_MAGIC) break;
         uint8_t st = KV_STATE_ERASED;
-        if (read_state(off, hdr.len, &st) != FLASH_OK) break;
+        if (read_state(off, hdr.len, &st) != 0) break;
         if (st != KV_STATE_COMMITTED) { off += rec_total(hdr.len); continue; }
         if (hdr.len > KV_MAX_VALUE) { off += rec_total(hdr.len); continue; }
         uint8_t val[KV_MAX_VALUE];
@@ -310,7 +310,7 @@ flash_err_t kv_summary(flash_dev_t *dev, kv_summary_t *sum)
         if (hdr.len == 0) {
             crc_calc = crc32_calc(val, 0); /* 空值 CRC，与写入端一致 */
         } else {
-            if (flash_sim_read(s_dev, s_base + off + sizeof(hdr), val, hdr.len) != FLASH_OK) break;
+            if (s_hal->read(s_hal->ctx, s_base + off + sizeof(hdr), val, hdr.len) != 0) break;
             crc_calc = crc32_calc(val, hdr.len);
         }
         if (crc_calc != hdr.crc) { off += rec_total(hdr.len); continue; }
@@ -322,5 +322,5 @@ flash_err_t kv_summary(flash_dev_t *dev, kv_summary_t *sum)
         }
         off += rec_total(hdr.len);
     }
-    return FLASH_OK;
+    return 0;
 }

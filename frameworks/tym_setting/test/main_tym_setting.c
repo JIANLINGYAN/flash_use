@@ -20,6 +20,7 @@
 #include "app_setting_idle_activity.h"
 #include "SettingSrv_priv.h"
 
+#include "flash_hal_adapter.h"
 #include "flash_sim.h"
 #include "tym_setting_sim_port.h"
 
@@ -223,7 +224,10 @@ int main(void)
            cfg.type == FLASH_TYPE_NAND ? "NAND" : "NOR",
            cfg.total_size, cfg.erase_size, capacity, capacity / cfg.erase_size);
 
-    tym_setting_sim_setup(s_dev, 0, capacity, cfg.erase_size);
+    /* 打开介质 -> 包装为统一 flash_hal_t -> 注册给移植层 */
+    flash_hal_t hal;
+    flash_hal_from_sim(s_dev, cfg.total_size, cfg.erase_size, cfg.write_size, &hal);
+    tym_setting_sim_setup(&hal, 0, capacity, cfg.erase_size);
 
     const char *tests = getenv("KV_TESTS");
 

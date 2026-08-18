@@ -12,12 +12,14 @@
 
 #include "app_register.h"
 #include "app_util.h"
+#include "flash_hal_adapter.h"
 #include "bm_config.h"
 
 #define BM_AD_BIN "app_baremetal.bin"
 #define BM_AD_PAYLOAD_MAX 256u
 
 static flash_dev_t *s_dev = NULL;
+static flash_hal_t s_hal;
 static bm_config_t s_ctx;
 static uint32_t s_payload_len = 0;
 
@@ -48,8 +50,9 @@ static int bm_init_impl(const app_option_t *opt)
     if (!app_env_u32("APP_REINIT", 0)) {
         flash_sim_erase(s_dev, 0, cfg.total_size);
     }
-    return bm_config_init(&s_ctx, s_dev, 0, part, part, s_payload_len)
-           == FLASH_OK ? 0 : -1;
+    flash_hal_from_sim(s_dev, cfg.total_size, cfg.erase_size, cfg.write_size, &s_hal);
+    return bm_config_init(&s_ctx, &s_hal, 0, part, part, s_payload_len)
+           == 0 ? 0 : -1;
 }
 
 static void bm_deinit_impl(void)
@@ -70,7 +73,7 @@ static int bm_save_impl(const void *data, uint32_t len)
     if (!s_dev || !data || len != s_payload_len) {
         return -1;
     }
-    return bm_config_save(&s_ctx, data) == FLASH_OK ? 0 : -1;
+    return bm_config_save(&s_ctx, data) == 0 ? 0 : -1;
 }
 
 static int bm_load_impl(void *data, uint32_t len)
@@ -78,7 +81,7 @@ static int bm_load_impl(void *data, uint32_t len)
     if (!s_dev || !data || len != s_payload_len) {
         return -1;
     }
-    return bm_config_load(&s_ctx, data) == FLASH_OK ? 0 : -1;
+    return bm_config_load(&s_ctx, data) == 0 ? 0 : -1;
 }
 
 static const app_component_t s_baremetal_comp = {

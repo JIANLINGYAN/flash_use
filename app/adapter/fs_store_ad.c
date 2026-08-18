@@ -12,11 +12,13 @@
 
 #include "app_register.h"
 #include "app_util.h"
+#include "flash_hal_adapter.h"
 #include "fs_store.h"
 
 #define FS_AD_BIN "app_fs_store.bin"
 
 static flash_dev_t *s_dev = NULL;
+static flash_hal_t s_hal;
 static uint32_t s_block_size = 0;
 
 static int fs_init_impl(const app_option_t *opt)
@@ -48,15 +50,16 @@ static int fs_init_impl(const app_option_t *opt)
     if (!s_dev) {
         return -1;
     }
+    flash_hal_from_sim(s_dev, cfg.total_size, cfg.erase_size, cfg.write_size, &s_hal);
     /* 掉电恢复（APP_REINIT=1）：保留介质内容，仅重新挂载加载 */
     if (!app_env_u32("APP_REINIT", 0)) {
-        if (fs_format(s_dev, 0, capacity, s_block_size) != FS_OK) {
+        if (fs_format(&s_hal, 0, capacity, s_block_size) != FS_OK) {
             flash_sim_deinit(s_dev);
             s_dev = NULL;
             return -1;
         }
     }
-    return fs_init(s_dev, 0, capacity, s_block_size) == FS_OK ? 0 : -1;
+    return fs_init(&s_hal, 0, capacity, s_block_size) == FS_OK ? 0 : -1;
 }
 
 static void fs_deinit_impl(void)
@@ -77,7 +80,7 @@ static int fs_write_impl(const char *name, const void *buf, uint32_t len)
     if (!s_dev || !name || !buf) {
         return -1;
     }
-    return fs_write(s_dev, name, buf, len) == FS_OK ? 0 : -1;
+    return fs_write(&s_hal, name, buf, len) == FS_OK ? 0 : -1;
 }
 
 static int fs_read_impl(const char *name, void *buf, uint32_t *len)
@@ -85,7 +88,7 @@ static int fs_read_impl(const char *name, void *buf, uint32_t *len)
     if (!s_dev || !name || !buf || !len) {
         return -1;
     }
-    return fs_read(s_dev, name, buf, 0, len) == FS_OK ? 0 : -1;
+    return fs_read(&s_hal, name, buf, 0, len) == FS_OK ? 0 : -1;
 }
 
 static int fs_append_impl(const char *name, const void *buf, uint32_t len)
@@ -93,7 +96,7 @@ static int fs_append_impl(const char *name, const void *buf, uint32_t len)
     if (!s_dev || !name || !buf) {
         return -1;
     }
-    return fs_append(s_dev, name, buf, len) == FS_OK ? 0 : -1;
+    return fs_append(&s_hal, name, buf, len) == FS_OK ? 0 : -1;
 }
 
 static int fs_delete_impl(const char *name)
@@ -101,7 +104,7 @@ static int fs_delete_impl(const char *name)
     if (!s_dev || !name) {
         return -1;
     }
-    return fs_delete(s_dev, name) == FS_OK ? 0 : -1;
+    return fs_delete(&s_hal, name) == FS_OK ? 0 : -1;
 }
 
 static int fs_get_size_impl(const char *name, uint32_t *size)
@@ -109,7 +112,7 @@ static int fs_get_size_impl(const char *name, uint32_t *size)
     if (!s_dev || !name || !size) {
         return -1;
     }
-    return fs_get_size(s_dev, name, size) == FS_OK ? 0 : -1;
+    return fs_get_size(&s_hal, name, size) == FS_OK ? 0 : -1;
 }
 
 static const app_component_t s_fs_store_comp = {

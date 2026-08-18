@@ -12,11 +12,13 @@
 
 #include "app_register.h"
 #include "app_util.h"
+#include "flash_hal_adapter.h"
 #include "kv_store.h"
 
 #define KV_AD_BIN "app_kv_store.bin"
 
 static flash_dev_t *s_dev = NULL;
+static flash_hal_t s_hal;
 static uint32_t s_capacity = 0;
 
 static int kv_init_impl(const app_option_t *opt)
@@ -44,7 +46,8 @@ static int kv_init_impl(const app_option_t *opt)
     if (!app_env_u32("APP_REINIT", 0)) {
         flash_sim_erase(s_dev, 0, s_capacity);
     }
-    return kv_init(s_dev, 0, s_capacity) == FLASH_OK ? 0 : -1;
+    flash_hal_from_sim(s_dev, cfg.total_size, cfg.erase_size, cfg.write_size, &s_hal);
+    return kv_init(&s_hal, 0, s_capacity) == 0 ? 0 : -1;
 }
 
 static void kv_deinit_impl(void)
@@ -83,7 +86,7 @@ static int kv_set_impl(const char *key, const void *val, uint16_t len)
     if (!s_dev || !val || len == 0) {
         return -1;
     }
-    return kv_write(s_dev, kv_key_id(key), val, len) == FLASH_OK ? 0 : -1;
+    return kv_write(&s_hal, kv_key_id(key), val, len) == 0 ? 0 : -1;
 }
 
 static int kv_get_impl(const char *key, void *val, uint16_t *len)
@@ -91,7 +94,7 @@ static int kv_get_impl(const char *key, void *val, uint16_t *len)
     if (!s_dev || !len) {
         return -1;
     }
-    return kv_read(s_dev, kv_key_id(key), val, len) == FLASH_OK ? 0 : -1;
+    return kv_read(&s_hal, kv_key_id(key), val, len) == 0 ? 0 : -1;
 }
 
 static int kv_del_impl(const char *key)
@@ -99,7 +102,7 @@ static int kv_del_impl(const char *key)
     if (!s_dev) {
         return -1;
     }
-    return kv_delete(s_dev, kv_key_id(key)) == FLASH_OK ? 0 : -1;
+    return kv_delete(&s_hal, kv_key_id(key)) == 0 ? 0 : -1;
 }
 
 static const app_component_t s_kv_store_comp = {

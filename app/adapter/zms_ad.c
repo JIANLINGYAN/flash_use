@@ -15,12 +15,14 @@
 
 #include "app_register.h"
 #include "app_util.h"
+#include "flash_hal_adapter.h"
 #include "zephyr_compat.h"
 
 #define ZMS_AD_BIN "app_zms.bin"
 #define ZMS_AD_ID_BASE 0x1000u
 
 static flash_dev_t *s_dev = NULL;
+static flash_hal_t s_hal;
 static struct zms_fs s_fs;
 static int s_inited = 0;
 
@@ -68,8 +70,9 @@ static int zms_ad_init_impl(const app_option_t *opt)
         flash_sim_erase(s_dev, 0, capacity);
     }
 
+    flash_hal_from_sim(s_dev, cfg.total_size, cfg.erase_size, cfg.write_size, &s_hal);
     const struct device *zdev =
-        zephyr_compat_register_flash(s_dev, cfg.erase_size, 1, 0xFF);
+        zephyr_compat_register_flash(&s_hal, cfg.erase_size, 1, 0xFF);
     memset(&s_fs, 0, sizeof(s_fs));
     s_fs.offset = 0;
     s_fs.sector_size = cfg.erase_size;

@@ -947,7 +947,7 @@
         a.href = url; a.download = o.fname; document.body.appendChild(a);
         a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
         appendOut(els.genOutput, "ok", "已生成并下载：" + o.fname);
-        appendOut(els.genOutput, "info", "包内含 README.md / PORTING.md / HAL_CONTRACT.md / AI_PORTING_PROMPT.md + demo 自检 + manifest.json");
+        appendOut(els.genOutput, "info", "包内含 README.md / PORTING.md / HAL_CONTRACT.md / AI_PORTING_PROMPT.md + 零依赖内存 HAL 自检 demo + manifest.json");
       })
       .catch(function (e) { appendOut(els.genOutput, "stderr", "生成失败：" + e.message); });
   }

@@ -22,11 +22,11 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "flash_sim.h"
+#include "flash_hal.h"
 #include "ef_port.h"
 
 /* ---- 运行期配置（由 ef_port_setup 注入，供 ef_cfg.h 中的宏读取） ---- */
-static flash_dev_t *s_dev;            /* 底层模拟基座设备句柄 */
+static const flash_hal_t *s_hal;      /* 统一 HAL 注册实例 */
 static uint32_t     s_start_addr;     /* KV 区起始偏移 */
 static uint32_t     s_area_size;      /* KV 区大小 */
 static uint32_t     s_erase_size;     /* 擦除块大小 */
@@ -41,10 +41,10 @@ static const ef_env default_env_set[] = {
     {"ef_ver", "4.x", 0},
 };
 
-void ef_port_setup(flash_dev_t *dev, uint32_t start_addr, uint32_t area_size,
+void ef_port_setup(const flash_hal_t *hal, uint32_t start_addr, uint32_t area_size,
                    uint32_t erase_size, int verbose)
 {
-    s_dev = dev;
+    s_hal = hal;
     s_start_addr = start_addr;
     s_area_size = area_size;
     s_erase_size = erase_size;
@@ -60,8 +60,8 @@ EfErrCode ef_port_init(ef_env const **default_env, size_t *default_env_size)
 
 EfErrCode ef_port_read(uint32_t addr, uint32_t *buf, size_t size)
 {
-    if (!s_dev || size == 0) { return EF_NO_ERR; }
-    if (flash_sim_read(s_dev, addr, buf, (uint32_t)size) != FLASH_OK) {
+    if (!s_hal || size == 0) { return EF_NO_ERR; }
+    if (s_hal->read(s_hal->ctx, addr, buf, (uint32_t)size) != 0) {
         return EF_READ_ERR;
     }
     return EF_NO_ERR;
@@ -69,7 +69,7 @@ EfErrCode ef_port_read(uint32_t addr, uint32_t *buf, size_t size)
 
 EfErrCode ef_port_erase(uint32_t addr, size_t size)
 {
-    if (!s_dev || size == 0) { return EF_NO_ERR; }
+    if (!s_hal || size == 0) { return EF_NO_ERR; }
 
     /* 起始地址须按最小擦除单位对齐（EasyFlash 契约） */
     EF_ASSERT(addr % EF_ERASE_MIN_SIZE == 0);
@@ -82,7 +82,7 @@ EfErrCode ef_port_erase(uint32_t addr, size_t size)
     uint32_t rem = aligned % s_erase_size;
     if (rem != 0) { aligned += s_erase_size - rem; }
 
-    if (flash_sim_erase(s_dev, addr, aligned) != FLASH_OK) {
+    if (s_hal->erase(s_hal->ctx, addr, aligned) != 0) {
         return EF_ERASE_ERR;
     }
     return EF_NO_ERR;
@@ -90,8 +90,8 @@ EfErrCode ef_port_erase(uint32_t addr, size_t size)
 
 EfErrCode ef_port_write(uint32_t addr, const uint32_t *buf, size_t size)
 {
-    if (!s_dev || size == 0) { return EF_NO_ERR; }
-    if (flash_sim_write(s_dev, addr, buf, (uint32_t)size) != FLASH_OK) {
+    if (!s_hal || size == 0) { return EF_NO_ERR; }
+    if (s_hal->write(s_hal->ctx, addr, buf, (uint32_t)size) != 0) {
         return EF_WRITE_ERR;
     }
     return EF_NO_ERR;

@@ -22,6 +22,7 @@
 #include <easyflash.h>
 
 #include "ef_port.h"
+#include "flash_hal_adapter.h"
 #include "flash_sim.h"
 
 #include <stdio.h>
@@ -317,6 +318,8 @@ int main(void)
         printf("  Flash 初始化失败!\n");
         return 1;
     }
+    flash_hal_t hal;
+    flash_hal_from_sim(dev, cfg.total_size, cfg.erase_size, cfg.write_size, &hal);
 
     /* KV 区容量：须为擦除块整数倍且至少 2 块（GC 需要空闲块） */
     uint32_t capacity = (uint32_t)env_long("KV_CAPACITY",
@@ -337,7 +340,7 @@ int main(void)
     flash_sim_erase(dev, 0, capacity);
 
     /* 注入移植层参数，然后初始化 EasyFlash */
-    ef_port_setup(dev, 0, capacity, cfg.erase_size,
+    ef_port_setup(&hal, 0, capacity, cfg.erase_size,
                   (int)env_long("EF_VERBOSE", 0));
     if (easyflash_init() != EF_NO_ERR) {
         printf("  [FAIL] easyflash_init 失败\n");

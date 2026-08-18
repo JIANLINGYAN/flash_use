@@ -4,7 +4,7 @@
  *
  * Zephyr 兼容层：zephyr/device.h 最小模拟。
  * 组件仅把 device 指针透传给 flash 设备 API，不解析内部字段。
- * sim 指向 flash_sim 设备句柄；params 指向设备参数（见 drivers/flash.h）。
+ * sim 指向统一 flash_hal_t 注册实例；params 指向设备参数（见 drivers/flash.h）。
  */
 
 #ifndef ZEPHYR_INCLUDE_ZEPHYR_DEVICE_H_
@@ -19,8 +19,8 @@ extern "C" {
 struct flash_parameters;
 
 /**
- * 模拟设备。本平台中即"一块模拟 Flash 介质"的包装：
- *  - sim     : flash_dev_t*（flash_sim 句柄）
+ * 模拟设备。本平台中即"一块 Flash 介质"的包装：
+ *  - sim     : flash_hal_t*（统一 HAL 注册实例）
  *  - params  : flash_parameters*（write_block_size / erase_value）
  *  - page_size: 介质页大小（模拟层取 erase_size）
  */

@@ -21,6 +21,7 @@
  */
 
 #include "flash_sim.h"
+#include "flash_hal_adapter.h"
 #include "kv_store.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -56,67 +57,67 @@ static uint32_t s_seed;
 static uint32_t rnd(void) { s_seed = s_seed * 1664525u + 1013904223u; return s_seed; }
 
 /* 基础测试项 */
-static void t_write_read(flash_dev_t *dev, uint32_t base, uint32_t size)
+static void t_write_read(const flash_hal_t *hal, uint32_t base, uint32_t size)
 {
-    kv_init(dev, base, size);
+    kv_init(hal, base, size);
     const char *v = "hello-kv";
-    expect("write_read: write", kv_write(dev, 1, v, (uint16_t)strlen(v)) == FLASH_OK);
+    expect("write_read: write", kv_write(hal, 1, v, (uint16_t)strlen(v)) == 0);
     char rb[32] = {0}; uint16_t rl = sizeof(rb);
-    expect("write_read: read", kv_read(dev, 1, rb, &rl) == FLASH_OK);
+    expect("write_read: read", kv_read(hal, 1, rb, &rl) == 0);
     expect("write_read: match", rl == strlen(v) && memcmp(rb, v, rl) == 0);
 }
 
-static void t_update(flash_dev_t *dev, uint32_t base, uint32_t size)
+static void t_update(const flash_hal_t *hal, uint32_t base, uint32_t size)
 {
-    kv_init(dev, base, size);
+    kv_init(hal, base, size);
     const char *v = "v1";
-    kv_write(dev, 1, v, (uint16_t)strlen(v));
+    kv_write(hal, 1, v, (uint16_t)strlen(v));
     const char *v2 = "updated-value!!";
-    expect("update: write", kv_write(dev, 1, v2, (uint16_t)strlen(v2)) == FLASH_OK);
+    expect("update: write", kv_write(hal, 1, v2, (uint16_t)strlen(v2)) == 0);
     char rb[32] = {0}; uint16_t rl = sizeof(rb);
-    expect("update: read latest", kv_read(dev, 1, rb, &rl) == FLASH_OK);
+    expect("update: read latest", kv_read(hal, 1, rb, &rl) == 0);
     expect("update: match", rl == strlen(v2) && memcmp(rb, v2, rl) == 0);
 }
 
-static void t_delete(flash_dev_t *dev, uint32_t base, uint32_t size)
+static void t_delete(const flash_hal_t *hal, uint32_t base, uint32_t size)
 {
-    kv_init(dev, base, size);
+    kv_init(hal, base, size);
     int32_t num = 0x12345678;
-    kv_write(dev, 2, &num, sizeof(num));
-    expect("delete: delete", kv_delete(dev, 2) == FLASH_OK);
+    kv_write(hal, 2, &num, sizeof(num));
+    expect("delete: delete", kv_delete(hal, 2) == 0);
     uint16_t dl = 4;
-    expect("delete: read-deleted", kv_read(dev, 2, NULL, &dl) == FLASH_ERR_ARGS);
+    expect("delete: read-deleted", kv_read(hal, 2, NULL, &dl) == FLASH_HAL_ERR_ARGS);
 }
 
-static void t_powerloss(flash_dev_t *dev, uint32_t base, uint32_t size)
+static void t_powerloss(const flash_hal_t *hal, uint32_t base, uint32_t size)
 {
-    kv_init(dev, base, size);
+    kv_init(hal, base, size);
     /* 注入一笔 PENDING 残记录（状态字未提交），加载时应忽略 */
     kv_header_t h; h.magic = KV_MAGIC; h.key_id = 99; h.len = 3; h.crc = 0;
-    flash_sim_write(dev, base + size - 32, &h, sizeof(h));
-    kv_init(dev, base, size); /* 重新加载，99 不应出现 */
+    flash_sim_write((flash_dev_t *)hal->ctx, base + size - 32, &h, sizeof(h));
+    kv_init(hal, base, size); /* 重新加载，99 不应出现 */
     uint16_t dl = 8;
-    expect("powerloss: 残留丢弃", kv_read(dev, 99, NULL, &dl) == FLASH_ERR_ARGS);
+    expect("powerloss: 残留丢弃", kv_read(hal, 99, NULL, &dl) == FLASH_HAL_ERR_ARGS);
 }
 
-static void t_gc(flash_dev_t *dev, uint32_t base, uint32_t size)
+static void t_gc(const flash_hal_t *hal, uint32_t base, uint32_t size)
 {
-    kv_init(dev, base, size);
+    kv_init(hal, base, size);
     char big[200]; memset(big, 0xAB, sizeof(big));
     for (int i = 0; i < 200; i++) {
-        if (kv_write(dev, 7, big, (uint16_t)sizeof(big)) != FLASH_OK) break;
+        if (kv_write(hal, 7, big, (uint16_t)sizeof(big)) != 0) break;
     }
     uint16_t blen = sizeof(big); char bback[sizeof(big)] = {0};
-    expect("gc: read after gc", kv_read(dev, 7, bback, &blen) == FLASH_OK);
+    expect("gc: read after gc", kv_read(hal, 7, bback, &blen) == 0);
     expect("gc: match", blen == sizeof(big) && memcmp(bback, big, blen) == 0);
 }
 
 /* 单条目功能压测；累加统计到 *acc */
-static void func_item(flash_dev_t *dev, uint32_t base, uint32_t size,
+static void func_item(const flash_hal_t *hal, uint32_t base, uint32_t size,
                       uint32_t vlen, uint32_t n, uint32_t freq, uint32_t rounds,
                       uint32_t *acc_ops, uint32_t *acc_lost)
 {
-    kv_init(dev, base, size);
+    kv_init(hal, base, size);
     if (vlen > KV_MAX_VALUE) vlen = KV_MAX_VALUE;
     if (n == 0) n = 1;
     if (freq > 100) freq = 100;
@@ -127,22 +128,22 @@ static void func_item(flash_dev_t *dev, uint32_t base, uint32_t size,
 
     for (uint32_t k = 1; k <= n; k++) {
         for (uint32_t j = 0; j < vlen; j++) buf[j] = (uint8_t)rnd();
-        kv_write(dev, (uint16_t)k, buf, (uint16_t)vlen);
+        kv_write(hal, (uint16_t)k, buf, (uint16_t)vlen);
         (*acc_ops)++;
     }
     for (uint32_t r = 0; r < rounds; r++) {
         for (uint32_t k = 1; k <= n; k++) {
             if ((rnd() % 100) < freq) {
                 for (uint32_t j = 0; j < vlen; j++) buf[j] = (uint8_t)rnd();
-                kv_write(dev, (uint16_t)k, buf, (uint16_t)vlen);
+                kv_write(hal, (uint16_t)k, buf, (uint16_t)vlen);
                 (*acc_ops)++;
                 uint16_t rl = (uint16_t)vlen;
-                if (kv_read(dev, (uint16_t)k, rbuf, &rl) == FLASH_OK) {
+                if (kv_read(hal, (uint16_t)k, rbuf, &rl) == 0) {
                     if (rl != vlen || memcmp(buf, rbuf, vlen) != 0) lost++;
                 }
             } else {
                 uint16_t rl = (uint16_t)vlen;
-                if (kv_read(dev, (uint16_t)k, rbuf, &rl) == FLASH_OK) (*acc_ops)++;
+                if (kv_read(hal, (uint16_t)k, rbuf, &rl) == 0) (*acc_ops)++;
             }
         }
         LOG_INFO("  压测进度 round=%u/%u 累计操作=%u 当前丢失=%u",
@@ -196,6 +197,8 @@ int main(void)
         LOG_WARN("flash_sim_init 失败，请检查介质配置与 bin 路径");
         return 1;
     }
+    flash_hal_t hal;
+    flash_hal_from_sim(dev, cfg.total_size, cfg.erase_size, cfg.write_size, &hal);
     LOG_INFO("介质初始化完成");
 
     uint32_t capacity = (uint32_t)env_long("KV_CAPACITY",
@@ -209,11 +212,11 @@ int main(void)
     uint32_t rounds = (uint32_t)env_long("KV_ROUNDS", 20);
     LOG_INFO("启用的测试项: %s", tests && *tests ? tests : "(全部基础项)");
 
-    if (has_test(tests, "write_read")) { printf("\n[测试项] 基础写入/读取\n"); t_write_read(dev, 0, capacity); }
-    if (has_test(tests, "update"))     { printf("\n[测试项] 更新覆盖\n"); t_update(dev, 0, capacity); }
-    if (has_test(tests, "delete"))     { printf("\n[测试项] 删除\n"); t_delete(dev, 0, capacity); }
-    if (has_test(tests, "powerloss"))  { printf("\n[测试项] 掉电残留丢弃\n"); t_powerloss(dev, 0, capacity); }
-    if (has_test(tests, "gc"))         { printf("\n[测试项] 压实 GC\n"); t_gc(dev, 0, capacity); }
+    if (has_test(tests, "write_read")) { printf("\n[测试项] 基础写入/读取\n"); t_write_read(&hal, 0, capacity); }
+    if (has_test(tests, "update"))     { printf("\n[测试项] 更新覆盖\n"); t_update(&hal, 0, capacity); }
+    if (has_test(tests, "delete"))     { printf("\n[测试项] 删除\n"); t_delete(&hal, 0, capacity); }
+    if (has_test(tests, "powerloss"))  { printf("\n[测试项] 掉电残留丢弃\n"); t_powerloss(&hal, 0, capacity); }
+    if (has_test(tests, "gc"))         { printf("\n[测试项] 压实 GC\n"); t_gc(&hal, 0, capacity); }
 
     if (has_test(tests, "func")) {
         printf("\n[测试项] 功能压测（条目表）\n");
@@ -229,11 +232,11 @@ int main(void)
                 uint32_t n = (uint32_t)strtoul(p, (char **)&p, 10);
                 if (*p == ',') p++;
                 uint32_t freq = (uint32_t)strtoul(p, (char **)&p, 10);
-                func_item(dev, 0, capacity, vlen, n, freq, rounds, &acc_ops, &acc_lost);
+                func_item(&hal, 0, capacity, vlen, n, freq, rounds, &acc_ops, &acc_lost);
                 if (*p == ';') p++; else break;
             }
         } else {
-            func_item(dev, 0, capacity, 32, 50, 50, rounds, &acc_ops, &acc_lost);
+            func_item(&hal, 0, capacity, 32, 50, 50, rounds, &acc_ops, &acc_lost);
         }
         LOG_INFO("功能压测结束: 总操作=%u 数据丢失=%u", acc_ops, acc_lost);
         flash_stats_t fst; flash_sim_get_stats(dev, &fst);

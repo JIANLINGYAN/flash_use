@@ -2,10 +2,10 @@
  * zephyr_compat.c - Zephyr 兼容层实现
  *
  * 桥接映射：
- *   - flash_read/write     -> flash_sim_read/write（地址 = 介质绝对偏移）
- *   - flash_erase          -> flash_sim_erase（按块）
- *   - flash_flatten        -> flash_sim_erase（本平台介质均需显式擦除）
- *   - flash_area_*         -> 基于注册分区偏移的 flash_sim 操作
+ *   - flash_read/write     -> hal->read/write（地址 = 介质绝对偏移）
+ *   - flash_erase          -> hal->erase（按块）
+ *   - flash_flatten        -> hal->erase（本平台介质均需显式擦除）
+ *   - flash_area_*         -> 基于注册分区偏移的 hal 操作
  *   - crc8_ccitt/crc32_ieee-> 纯软件实现（poly 0x07 / 0xEDB88320）
  */
 
@@ -24,7 +24,7 @@
 /* ==================== 注册状态 ==================== */
 
 static struct {
-	flash_dev_t *sim;
+	const flash_hal_t *hal;
 	uint32_t erase_size;
 	uint8_t erase_value;
 	struct flash_parameters params;
@@ -35,17 +35,17 @@ static struct {
 
 /* ==================== 注册接口 ==================== */
 
-const struct device *zephyr_compat_register_flash(flash_dev_t *dev,
+const struct device *zephyr_compat_register_flash(const flash_hal_t *hal,
 						  uint32_t erase_size,
 						  uint32_t write_block_size,
 						  uint8_t erase_value)
 {
-	s_reg.sim = dev;
+	s_reg.hal = hal;
 	s_reg.erase_size = erase_size;
 	s_reg.erase_value = erase_value;
 	s_reg.params.write_block_size = write_block_size;
 	s_reg.params.erase_value = erase_value;
-	s_reg.device.sim = dev;
+	s_reg.device.sim = (void *)hal;
 	s_reg.device.params = &s_reg.params;
 	s_reg.device.page_size = erase_size;
 	return &s_reg.device;
@@ -87,11 +87,11 @@ size_t flash_get_write_block_size(const struct device *dev)
 
 int flash_read(const struct device *dev, off_t offset, void *data, size_t len)
 {
-	if (dev == NULL || dev->sim == NULL || data == NULL) {
+	const flash_hal_t *hal = (dev != NULL) ? (const flash_hal_t *)dev->sim : NULL;
+	if (hal == NULL || data == NULL) {
 		return -EINVAL;
 	}
-	if (flash_sim_read(dev->sim, (uint32_t)offset, data,
-			  (uint32_t)len) != FLASH_OK) {
+	if (hal->read(hal->ctx, (uint32_t)offset, data, (uint32_t)len) != 0) {
 		return -EIO;
 	}
 	return 0;
@@ -100,11 +100,11 @@ int flash_read(const struct device *dev, off_t offset, void *data, size_t len)
 int flash_write(const struct device *dev, off_t offset, const void *data,
 		size_t len)
 {
-	if (dev == NULL || dev->sim == NULL || data == NULL) {
+	const flash_hal_t *hal = (dev != NULL) ? (const flash_hal_t *)dev->sim : NULL;
+	if (hal == NULL || data == NULL) {
 		return -EINVAL;
 	}
-	if (flash_sim_write(dev->sim, (uint32_t)offset, data,
-			   (uint32_t)len) != FLASH_OK) {
+	if (hal->write(hal->ctx, (uint32_t)offset, data, (uint32_t)len) != 0) {
 		return -EIO;
 	}
 	return 0;
@@ -112,14 +112,14 @@ int flash_write(const struct device *dev, off_t offset, const void *data,
 
 int flash_erase(const struct device *dev, off_t offset, size_t size)
 {
-	if (dev == NULL || dev->sim == NULL) {
+	const flash_hal_t *hal = (dev != NULL) ? (const flash_hal_t *)dev->sim : NULL;
+	if (hal == NULL) {
 		return -EINVAL;
 	}
 	if (size == 0) {
 		return 0;
 	}
-	if (flash_sim_erase(dev->sim, (uint32_t)offset,
-			   (uint32_t)size) != FLASH_OK) {
+	if (hal->erase(hal->ctx, (uint32_t)offset, (uint32_t)size) != 0) {
 		return -EIO;
 	}
 	return 0;

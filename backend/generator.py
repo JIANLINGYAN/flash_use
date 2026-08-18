@@ -13,19 +13,19 @@ AI 辅助移植"的可移植库文件包：
     ├── HAL_CONTRACT.md         统一适配接口契约（所有框架一致的 Flash 操作抽象）
     ├── AI_PORTING_PROMPT.md    ★ 给"目标工程 AI"的移植提示词（可直接投喂）
     ├── manifest.json           包元信息（供导入校验识别）
-    ├── core/                   框架核心（平台无关）或 HAL 参考实现 core/flash_sim.c
+    ├── core/                   框架核心（平台无关）或 HAL 参考实现 core/flash_hal_mem.c
     ├── vendor/                 开源/厂商源码（零修改，只读）
     ├── port/                   平台移植层（目标平台替换/重写点）
     ├── config/                 配置文件模板（分区/几何参数）
-    ├── include/                对外公共头 + HAL 契约头 include/flash_sim.h
+    ├── include/                对外公共头 + HAL 契约头 include/flash_hal.h
     └── demo/
-        ├── test_main.c         标准自检入口（对接 flash_sim.h）
+        ├── test_main.c         标准自检入口（对接 include/flash_hal.h）
         └── BUILD.md            构建与运行说明（自动生成命令）
 
 设计原则：
   - 仅依赖标准库 zipfile，无需联网/第三方模板引擎。
-  - 统一适配接口：所有框架只依赖 include/flash_sim.h 声明的
-    read/write/erase 契约，移植 = 按契约实现真实驱动（参考 core/flash_sim.c）。
+  - 统一适配接口：所有框架只依赖 include/flash_hal.h 声明的
+    read/write/erase 契约，移植 = 按契约实现真实驱动（参考 core/flash_hal_mem.c）。
   - 保留子目录结构（zephyr 系框架依赖 <zephyr/...> 头路径），manifest 记录
     相对路径与 include 目录，供导入/运行闭环使用。
 """
@@ -49,7 +49,7 @@ DIR_DEMO = "demo"      # 自检入口 + 构建说明
 PACKAGE_DIRS = [DIR_CORE, DIR_VENDOR, DIR_PORT, DIR_CONFIG, DIR_INCLUDE, DIR_DEMO]
 
 # 框架形态
-KIND_SELF = "self"       # 自研框架：直接调用 flash_sim 契约
+KIND_SELF = "self"       # 自研框架：直接调用 flash_hal 契约
 KIND_VENDOR = "vendor"   # 开源/厂商组件：vendor + sim_port 移植层
 KIND_ZEPHYR = "zephyr"   # Zephyr 组件：vendor + zephyr_compat 兼容层
 
@@ -85,24 +85,23 @@ RECIPES = {
             "无 RTOS 依赖，纯 C99",
         ],
         "api": [
-            ("kv_init(dev, base, size)", "初始化 KV 区并扫描重建 key->offset 索引"),
-            ("kv_write(dev, key_id, value, len)", "写入/更新；key_id 0 保留，1~65535 可用"),
-            ("kv_read(dev, key_id, value, len)", "读取；len 为出入参，NULL 时仅查询长度"),
-            ("kv_delete(dev, key_id)", "删除（写入 len=0 的失效记录）"),
-            ("kv_summary(dev, &sum)", "统计有效条目数 / 历史写入记录数"),
+            ("kv_init(&hal, base, size)", "初始化 KV 区并扫描重建 key->offset 索引"),
+            ("kv_write(&hal, key_id, value, len)", "写入/更新；key_id 0 保留，1~65535 可用"),
+            ("kv_read(&hal, key_id, value, len)", "读取；len 为出入参，NULL 时仅查询长度"),
+            ("kv_delete(&hal, key_id)", "删除（写入 len=0 的失效记录）"),
+            ("kv_summary(&hal, &sum)", "统计有效条目数 / 历史写入记录数"),
             ("kv_used_bytes()", "已用字节数（含历史失效记录）"),
         ],
         "use_hint": (
-            "flash_dev_t *dev = flash_sim_init(&cfg);   /* 介质：按 flash_sim.h 契约实现 */\n"
-            "kv_init(dev, 0, 8 * 1024);                 /* 0~8KB 为 KV 区 */\n"
-            "kv_write(dev, 1, \"hello\", 5);\n"
+            "flash_hal_t hal; flash_hal_mem_create(64 * 1024, 4096, &hal);   /* PC 演示：内存介质；目标平台替换为真实驱动注册 */\n"
+            "kv_init(&hal, 0, 8 * 1024);                 /* 0~8KB 为 KV 区 */\n"
+            "kv_write(&hal, 1, \"hello\", 5);\n"
             "char buf[32]; uint16_t len = sizeof(buf);\n"
-            "kv_read(dev, 1, buf, &len);\n"
-            "kv_delete(dev, 1);"
+            "kv_read(&hal, 1, buf, &len);\n"
+            "kv_delete(&hal, 1);"
         ),
-        "hal_map": "kv_store 直接调用契约接口（flash_sim_read/write/erase）与 "
-                   "FLASH_CFG_DEFAULTS_BY_TYPE 宏；无需额外移植层，"
-                   "移植 = 按 include/flash_sim.h 契约实现真实驱动（参考 core/flash_sim.c）。",
+        "hal_map": "kv_store 直接调用契约接口（hal->read/write/erase）；无需额外移植层，"
+                   "移植 = 按 include/flash_hal.h 契约实现真实驱动（参考 core/flash_hal_mem.c 内存介质）。",
         "cfg_items": [
             ("capacity", "KV 区容量（字节）", "8192"),
             ("page_size", "页大小（字节）", "256"),
@@ -112,55 +111,48 @@ RECIPES = {
             "KV 区容量须为 erase_size 整数倍",
             "key_id 0 保留，业务从 1 开始",
             "单条 value 上限 KV_MAX_VALUE=256 字节",
-            "区域写满且无可回收空间时返回 FLASH_ERR_RANGE，需上层触发 GC/换区",
+            "区域写满且无可回收空间时返回 FLASH_HAL_ERR_RANGE，需上层触发 GC/换区",
         ],
     },
     "simulator": {
-        "lib_name": "flash_sim",
-        "title": "Flash 模拟基座（HAL 参考实现）",
+        "lib_name": "flash_hal",
+        "title": "统一 Flash HAL 参考实现（内存介质）",
         "kind": KIND_SELF,
         "src_dir": "simulator",
-        "copy_files": ["flash_sim.c", "flash_sim.h"],
-        "desc": "Flash 物理特性模拟库，提供统一 read/write/erase 接口（即本包 HAL 契约的 PC 参考实现）。",
+        "copy_files": [],
+        "desc": "平台无关的统一 Flash 操作抽象（flash_hal_t）+ 零依赖内存模拟介质参考实现，"
+                "是每个导出库移植时的最低适配点。",
         "media": "NOR / NAND / EEPROM（仿真）",
         "features": [
-            "NOR/NAND 按块擦除、写入仅允许 1->0 的物理语义",
-            "EEPROM 字节级直接改写、无擦除概念",
-            "寿命（标称擦写次数）/ 固定坏块 / 运行时坏块比率仿真",
-            "读写擦耗时仿真，磨损分布与统计接口",
+            "注册式 HAL：实现 read/write/erase 三个回调即可被任何框架使用",
+            "内存介质参考实现（core/flash_hal_mem.c），零依赖、可 PC 直跑",
+            "按块擦除 + 随机读写，语义与真实 Flash 驱动一致",
         ],
         "api": [
-            ("flash_sim_init(cfg)", "打开/创建介质，返回设备句柄；失败返回 NULL"),
-            ("flash_sim_read(dev, off, buf, len)", "随机读 len 字节"),
-            ("flash_sim_write(dev, off, buf, len)", "写入（NOR/NAND 前须已擦除）"),
-            ("flash_sim_erase(dev, off, len)", "按 erase_size 对齐块擦除"),
-            ("flash_sim_deinit(dev)", "关闭介质"),
-            ("flash_sim_get_stats/get_wear_map/block_count", "统计与磨损分布（可选）"),
+            ("flash_hal_mem_create(total, erase, &hal)", "创建内存介质并填充 flash_hal_t"),
+            ("hal.read(ctx, off, buf, len)", "随机读 len 字节"),
+            ("hal.write(ctx, off, buf, len)", "写入（框架保证写前已擦除）"),
+            ("hal.erase(ctx, off, len)", "按擦除块整块擦除"),
+            ("flash_hal_mem_destroy(&hal)", "释放内存介质"),
         ],
         "use_hint": (
-            "flash_config_t cfg = {0};\n"
-            "FLASH_CFG_DEFAULTS_BY_TYPE(cfg, FLASH_TYPE_NOR);\n"
-            "cfg.bin_path = \"media.bin\";\n"
-            "flash_dev_t *dev = flash_sim_init(&cfg);\n"
-            "flash_sim_erase(dev, 0, cfg.erase_size);\n"
-            "flash_sim_write(dev, 0, data, len);\n"
-            "flash_sim_read(dev, 0, buf, len);\n"
-            "flash_sim_deinit(dev);"
+            "flash_hal_t hal;\n"
+            "flash_hal_mem_create(64 * 1024, 4096, &hal);  /* PC 演示：内存介质 */\n"
+            "hal.erase(hal.ctx, 0, 4096);\n"
+            "hal.write(hal.ctx, 0, data, len);\n"
+            "hal.read(hal.ctx, 0, buf, len);\n"
+            "flash_hal_mem_destroy(&hal);"
         ),
-        "hal_map": "本包即为 HAL 参考实现。真实目标上按 include/flash_sim.h 契约重写 "
-                   "flash_sim_read/write/erase/deinit（对接真实 SPI/QSPI/NAND 驱动），"
-                   "上层框架逻辑完全不用改。",
+        "hal_map": "本包即统一 HAL 契约 + 内存参考实现。目标平台按 include/flash_hal.h "
+                   "实现 flash_hal_t 的 read/write/erase 回调（对接真实 SPI/QSPI/NAND 驱动），"
+                   "把回调注册给任意框架即可使用，框架零改动。",
         "cfg_items": [
-            ("type", "介质类型（0=NOR 1=NAND 2=EEPROM）", "0"),
-            ("total_size", "总容量（字节）", "64*1024"),
+            ("total_size", "介质总容量（字节）", "64*1024"),
             ("erase_size", "擦除块大小（字节）", "4096"),
-            ("write_size", "最小写入单位（字节）", "1"),
-            ("erase_cycles", "标称擦写寿命（次）", "100000"),
         ],
         "caveats": [
-            "NOR/NAND 写入前必须擦除（仅 1->0）",
-            "bin_path 为 PC 仿真文件路径，真实目标实现无需该字段",
-            "EEPROM 不支持擦除（flash_sim_erase 返回 FLASH_ERR_NOTSUP）",
+            "内存介质仅为演示/自检用，目标平台必须替换为真实驱动",
+            "写入语义为普通覆盖写；NOR 目标上写前须已擦除（由框架保证）",
         ],
     },
     "easyflash": {
@@ -187,7 +179,7 @@ RECIPES = {
             "frameworks/easyflash/vendor/inc/ef_def.h",
         ],
         "test_entry": "frameworks/easyflash/test/main_easyflash.c",
-        "requires": "flash_sim",
+        "requires": "flash_hal",
         "api": [
             ("easyflash_init()", "初始化 ENV（须先 ef_port_setup 绑定介质与分区）"),
             ("ef_set_env(key, value) / ef_get_env(key)", "字符串 KV 写入/读取"),
@@ -196,8 +188,8 @@ RECIPES = {
             ("ef_get_env_write_bytes()", "查询累计写入字节（磨损观测）"),
         ],
         "use_hint": (
-            "flash_dev_t *dev = flash_sim_init(&cfg);\n"
-            "ef_port_setup(dev, 0, 8 * 1024, 4096, 0);   /* 绑定 ENV 区：基址/容量/擦除块 */\n"
+            "flash_hal_t hal; flash_hal_mem_create(64 * 1024, 4096, &hal);\n"
+            "ef_port_setup(&hal, 0, 8 * 1024, 4096, 0);   /* 绑定 ENV 区：基址/容量/擦除块 */\n"
             "easyflash_init();\n"
             "ef_set_env(\"key\", \"value\");\n"
             "char *v = ef_get_env(\"key\");\n"
@@ -205,7 +197,7 @@ RECIPES = {
         ),
         "hal_map": "ef_port.c 将 EasyFlash 底层环境存取（ef_port_env_read/erase/write 等）"
                    "桥接到统一契约接口。移植 = 保留 vendor/ 零修改，把 port/ef_port.c 的"
-                   "底层调用改写为目标驱动（或按契约实现 flash_sim 后直接复用 ef_port.c）。",
+                   "底层调用改写为目标驱动（或按 include/flash_hal.h 契约实现真实驱动后直接复用 ef_port.c）。",
         "cfg_items": [
             ("capacity", "ENV 区容量（字节，须 >= 2*erase_size）", "8192"),
             ("erase_size", "擦除块大小（字节）", "4096"),
@@ -247,22 +239,22 @@ RECIPES = {
             "frameworks/flashdb/vendor/fal/inc/fal_def.h",
         ],
         "test_entry": "frameworks/flashdb/test/main_flashdb.c",
-        "requires": "flash_sim",
+        "requires": "flash_hal",
         "api": [
-            ("fal_sim_port_init(dev, total, erase, off, len, verbose)", "绑定介质 + FAL 初始化 + 安装 KVDB 分区"),
+            ("fal_sim_port_init(&hal, total, erase, off, len, verbose)", "绑定介质 + FAL 初始化 + 安装 KVDB 分区"),
             ("fdb_kvdb_init(&db, name, part_name, ...)", "在分区上创建/打开 KVDB"),
             ("fdb_kv_set / fdb_kv_get(db, key, value)", "字符串 KV"),
             ("fdb_kv_set_blob / fdb_kv_get_blob(db, key, blob)", "二进制 KV"),
             ("fdb_kv_del(db, key) / fdb_kv_iterate(db, itr)", "删除 / 遍历"),
         ],
         "use_hint": (
-            "flash_dev_t *dev = flash_sim_init(&cfg);\n"
-            "fal_sim_port_init(dev, 64 * 1024, 4096, 0, 8 * 1024, 0);  /* 绑定+FAL+分区 */\n"
+            "flash_hal_t hal; flash_hal_mem_create(64 * 1024, 4096, &hal);\n"
+            "fal_sim_port_init(&hal, 64 * 1024, 4096, 0, 8 * 1024, 0);  /* 绑定+FAL+分区 */\n"
             "fdb_kvdb_t db;\n"
-            "fdb_kvdb_init(&db, \"cfg\", FAL_KVDB_PART_NAME, NULL, NULL);\n"
-            "fdb_kv_set(&db, \"key\", \"value\");\n"
-            "char *v = fdb_kv_get(&db, \"key\");\n"
-            "fdb_kv_del(&db, \"key\");"
+            "fdb_kvdb_init(db, \"cfg\", FAL_KVDB_PART_NAME, NULL, NULL);\n"
+            "fdb_kv_set(db, \"key\", \"value\");\n"
+            "char *v = fdb_kv_get(db, \"key\");\n"
+            "fdb_kv_del(db, \"key\");"
         ),
         "hal_map": "fal_flash_sim_port.c 实现 FAL 的 flash 操作（fal_flash_read/write/erase/"
                    "init），桥接到统一契约接口。移植 = 保留 vendor/ 零修改，改 port/ 层对接"
@@ -295,7 +287,7 @@ RECIPES = {
             "frameworks/baremetal/bm_config.h",
         ],
         "test_entry": "frameworks/baremetal/test/main_baremetal.c",
-        "requires": "flash_sim",
+        "requires": "flash_hal",
         "api": [
             ("bm_config_init(&ctx, dev, base_a, base_b, part_size, payload_len)", "绑定 A/B 分区并扫描确定当前生效者"),
             ("bm_config_save(&ctx, payload)", "保存配置（写入较旧分区，A/B 轮换）"),
@@ -306,12 +298,12 @@ RECIPES = {
         ],
         "use_hint": (
             "bm_config_t ctx;\n"
-            "flash_dev_t *dev = flash_sim_init(&cfg);\n"
+            "flash_hal_t hal; flash_hal_mem_create(64 * 1024, 4096, &hal);\n"
             "bm_config_init(&ctx, dev, 0, 4096, 4096, sizeof(my_cfg));  /* A=0 B=4096 */\n"
             "bm_config_save(&ctx, &my_cfg);\n"
             "bm_config_load(&ctx, &my_cfg);"
         ),
-        "hal_map": "bm_config 直接调用契约接口（flash_sim_erase/write/read）实现 A/B 轮换。"
+        "hal_map": "bm_config 直接调用契约接口（hal->erase/write/read）实现 A/B 轮换。"
                    "移植 = 按契约实现真实驱动即可，框架零改动。",
         "cfg_items": [
             ("part_size", "单分区大小（字节，>= 头部+payload）", "4096"),
@@ -342,26 +334,26 @@ RECIPES = {
             "frameworks/fs/fs_store.h",
         ],
         "test_entry": "frameworks/fs/test/main_fs.c",
-        "requires": "flash_sim",
+        "requires": "flash_hal",
         "api": [
-            ("fs_init(dev, base, size, block_size)", "初始化 FS（block_size 须=底层 erase_size）"),
-            ("fs_format(dev, base, size, block_size)", "格式化重建空 FAT"),
-            ("fs_create / fs_delete(dev, name)", "创建/删除文件"),
-            ("fs_write(dev, name, buf, len)", "覆盖写（不存在则创建）"),
-            ("fs_append(dev, name, buf, len)", "追加写"),
-            ("fs_read(dev, name, buf, offset, &len)", "按偏移读，len 为出入参"),
+            ("fs_init(&hal, base, size, block_size)", "初始化 FS（block_size 须=底层 erase_size）"),
+            ("fs_format(&hal, base, size, block_size)", "格式化重建空 FAT"),
+            ("fs_create / fs_delete(&hal, name)", "创建/删除文件"),
+            ("fs_write(&hal, name, buf, len)", "覆盖写（不存在则创建）"),
+            ("fs_append(&hal, name, buf, len)", "追加写"),
+            ("fs_read(&hal, name, buf, offset, &len)", "按偏移读，len 为出入参"),
             ("fs_get_size / fs_exists / fs_file_count", "查询"),
         ],
         "use_hint": (
-            "flash_dev_t *dev = flash_sim_init(&cfg);\n"
-            "fs_init(dev, 0, 32 * 1024, 4096);\n"
-            "fs_create(dev, \"cfg.txt\");\n"
-            "fs_write(dev, \"cfg.txt\", \"hello\", 5);\n"
+            "flash_hal_t hal; flash_hal_mem_create(64 * 1024, 4096, &hal);\n"
+            "fs_init(&hal, 0, 32 * 1024, 4096);\n"
+            "fs_create(&hal, \"cfg.txt\");\n"
+            "fs_write(&hal, \"cfg.txt\", \"hello\", 5);\n"
             "char buf[32]; uint32_t len = sizeof(buf);\n"
-            "fs_read(dev, \"cfg.txt\", buf, 0, &len);\n"
-            "fs_delete(dev, \"cfg.txt\");"
+            "fs_read(&hal, \"cfg.txt\", buf, 0, &len);\n"
+            "fs_delete(&hal, \"cfg.txt\");"
         ),
-        "hal_map": "fs_store 直接调用契约接口（flash_sim_erase/write/read）。"
+        "hal_map": "fs_store 直接调用契约接口（hal->erase/write/read）。"
                    "移植 = 按契约实现真实驱动即可，框架零改动。",
         "cfg_items": [
             ("capacity", "FS 区容量（字节，>= 2 块）", "32768"),
@@ -394,7 +386,7 @@ RECIPES = {
             "frameworks/littlefs/vendor/lfs_util.h",
         ],
         "test_entry": "frameworks/littlefs/test/main_littlefs.c",
-        "requires": "flash_sim",
+        "requires": "flash_hal",
         "api": [
             ("littlefs_sim_init_device(bin_path, &cfg)", "打开介质并填充 lfs_config（回调+几何）"),
             ("lfs_mount(&lfs, &cfg)", "挂载（首次 lfs_format）"),
@@ -402,7 +394,7 @@ RECIPES = {
             ("lfs_mkdir / lfs_remove / lfs_stat", "目录/删除/查询"),
         ],
         "use_hint": (
-            "flash_dev_t *dev = flash_sim_init(&cfg);\n"
+            "flash_hal_t hal; flash_hal_mem_create(64 * 1024, 4096, &hal);\n"
             "struct lfs_config lc;\n"
             "littlefs_sim_init_device(\"lfs.bin\", &lc);\n"
             "lfs_t lfs; lfs_format(&lfs, &lc);\n"
@@ -446,7 +438,7 @@ RECIPES = {
             "frameworks/fatfs/vendor/diskio.h",
         ],
         "test_entry": "frameworks/fatfs/test/main_fatfs.c",
-        "requires": "flash_sim",
+        "requires": "flash_hal",
         "api": [
             ("fatfs_sim_init_device(bin_path)", "打开介质并返回扇区大小"),
             ("f_mount(&fs, \"0:\", 1)", "挂载卷（首次 f_mkfs 格式化）"),
@@ -454,7 +446,7 @@ RECIPES = {
             ("f_mkdir / f_unlink / f_stat", "目录/删除/查询"),
         ],
         "use_hint": (
-            "flash_dev_t *dev = flash_sim_init(&cfg);\n"
+            "flash_hal_t hal; flash_hal_mem_create(64 * 1024, 4096, &hal);\n"
             "fatfs_sim_init_device(\"fat.bin\");\n"
             "FATFS fs; f_mount(&fs, \"0:\", 1);\n"
             "f_mkfs(\"0:\", FM_FAT | FM_SFD, 0, work, sizeof(work));  /* 首次 */\n"
@@ -500,7 +492,7 @@ RECIPES = {
             "frameworks/spiffs/vendor/spiffs.h",
         ],
         "test_entry": "frameworks/spiffs/test/main_spiffs.c",
-        "requires": "flash_sim",
+        "requires": "flash_hal",
         "api": [
             ("spiffs_sim_init_device(bin_path) / spiffs_sim_mount()", "打开介质并挂载"),
             ("spiffs_sim_format()", "格式化"),
@@ -508,7 +500,7 @@ RECIPES = {
             ("SPIFFS_remove / SPIFFS_rename / SPIFFS_stat", "删除/改名/查询"),
         ],
         "use_hint": (
-            "flash_dev_t *dev = flash_sim_init(&cfg);\n"
+            "flash_hal_t hal; flash_hal_mem_create(64 * 1024, 4096, &hal);\n"
             "spiffs_sim_init_device(\"spiffs.bin\");\n"
             "if (spiffs_sim_mount() != 0) { spiffs_sim_format(); spiffs_sim_mount(); }\n"
             "spiffs_file fd = SPIFFS_open(fs, \"a.txt\", SPIFFS_CREAT | SPIFFS_TRUNC | SPIFFS_RDWR, 0);\n"
@@ -604,7 +596,7 @@ RECIPES = {
             "-include",
             "frameworks/yaffs/yaffs_host_types.h",
         ],
-        "requires": "flash_sim",
+        "requires": "flash_hal",
         "api": [
             ("yaffs_sim_init_device(bin_path) / yaffs_sim_start_up()", "打开 NAND 介质并启动 YAFFS"),
             ("yaffs_mount(path)", "挂载文件系统"),
@@ -612,7 +604,7 @@ RECIPES = {
             ("yaffs_unlink / yaffs_mkdir / yaffs_stat", "删除/目录/查询"),
         ],
         "use_hint": (
-            "flash_dev_t *dev = flash_sim_init(&cfg);\n"
+            "flash_hal_t hal; flash_hal_mem_create(64 * 1024, 4096, &hal);\n"
             "yaffs_sim_init_device(\"yaffs.bin\");\n"
             "yaffs_sim_start_up();\n"
             "yaffs_mount(\"/\");\n"
@@ -673,9 +665,9 @@ RECIPES = {
         ],
         "test_entry": "frameworks/fcb/test/main_fcb.c",
         "cflags": ["-DCONFIG_FLASH_HAS_EXPLICIT_ERASE"],
-        "requires": "flash_sim",
+        "requires": "flash_hal",
         "api": [
-            ("zephyr_compat_register_flash(dev, erase, write_size, 0xFF)", "注册介质为 Zephyr flash 设备"),
+            ("zephyr_compat_register_flash(&hal, erase, write_size, 0xFF)", "注册介质为 Zephyr flash 设备"),
             ("zephyr_compat_register_area(id, zdev, off, size)", "注册分区"),
             ("fcb_init(area_id, &fcb)", "初始化环形缓冲"),
             ("fcb_append(&fcb, len, &loc)", "追加一条记录"),
@@ -683,8 +675,8 @@ RECIPES = {
             ("fcb_rotate / fcb_clear", "轮转 / 清空"),
         ],
         "use_hint": (
-            "flash_dev_t *dev = flash_sim_init(&cfg);\n"
-            "const struct device *zdev = zephyr_compat_register_flash(dev, 4096, 1, 0xFF);\n"
+            "flash_hal_t hal; flash_hal_mem_create(64 * 1024, 4096, &hal);\n"
+            "const struct device *zdev = zephyr_compat_register_flash(&hal, 4096, 1, 0xFF);\n"
             "zephyr_compat_register_area(0, zdev, 0, 16 * 1024);\n"
             "struct fcb fcb; fcb_init(0, &fcb);\n"
             "struct fcb_entry loc; fcb_append(&fcb, 8, &loc);   /* 之后写 loc.fe_data */\n"
@@ -692,7 +684,7 @@ RECIPES = {
         ),
         "hal_map": "zephyr_compat 兼容层把 Zephyr flash 设备 API / flash_area 分区 / k_mutex / "
                    "CRC 桥接到统一契约接口；vendor 零修改。移植 = 保留 vendor/ 与 port/zephyr_compat，"
-                   "仅需按契约实现真实驱动（参考 core/flash_sim.c）。",
+                   "仅需按契约实现真实驱动（参考 core/flash_hal_mem.c 内存介质）。",
         "cfg_items": [
             ("capacity", "FCB 区容量（字节）", "16384"),
             ("erase_size", "擦除块大小（字节）", "4096"),
@@ -736,9 +728,9 @@ RECIPES = {
         ],
         "test_entry": "frameworks/nvs/test/main_nvs.c",
         "cflags": ["-DCONFIG_FLASH_HAS_EXPLICIT_ERASE"],
-        "requires": "flash_sim",
+        "requires": "flash_hal",
         "api": [
-            ("zephyr_compat_register_flash(dev, erase, write_size, 0xFF)", "注册介质为 Zephyr flash 设备"),
+            ("zephyr_compat_register_flash(&hal, erase, write_size, 0xFF)", "注册介质为 Zephyr flash 设备"),
             ("nvs_mount(&fs)", "挂载（fs.offset/sector_size/sector_count 需配置）"),
             ("nvs_write(&fs, id, data, len)", "写入（len=0 等效删除）"),
             ("nvs_read(&fs, id, data, len)", "读取"),
@@ -746,8 +738,8 @@ RECIPES = {
             ("nvs_calc_free_space(&fs)", "剩余空间"),
         ],
         "use_hint": (
-            "flash_dev_t *dev = flash_sim_init(&cfg);\n"
-            "zephyr_compat_register_flash(dev, 4096, 1, 0xFF);\n"
+            "flash_hal_t hal; flash_hal_mem_create(64 * 1024, 4096, &hal);\n"
+            "zephyr_compat_register_flash(&hal, 4096, 1, 0xFF);\n"
             "struct nvs_fs fs = { .offset = 0, .sector_size = 4096, .sector_count = 4 };\n"
             "nvs_mount(&fs);\n"
             "nvs_write(&fs, 1, \"hello\", 5);\n"
@@ -798,9 +790,9 @@ RECIPES = {
         ],
         "test_entry": "frameworks/zms/test/main_zms.c",
         "cflags": ["-DCONFIG_FLASH_HAS_EXPLICIT_ERASE"],
-        "requires": "flash_sim",
+        "requires": "flash_hal",
         "api": [
-            ("zephyr_compat_register_flash(dev, erase, write_size, 0xFF)", "注册介质为 Zephyr flash 设备"),
+            ("zephyr_compat_register_flash(&hal, erase, write_size, 0xFF)", "注册介质为 Zephyr flash 设备"),
             ("zms_mount(&fs)", "挂载（fs.offset/sector_size/sector_count 需配置）"),
             ("zms_write(&fs, id, data, len)", "写入（len=0 等效删除）"),
             ("zms_read(&fs, id, data, len)", "读取"),
@@ -808,8 +800,8 @@ RECIPES = {
             ("zms_get_num_cycles(&fs, &cycles)", "磨损/循环计数统计"),
         ],
         "use_hint": (
-            "flash_dev_t *dev = flash_sim_init(&cfg);\n"
-            "zephyr_compat_register_flash(dev, 4096, 1, 0xFF);\n"
+            "flash_hal_t hal; flash_hal_mem_create(64 * 1024, 4096, &hal);\n"
+            "zephyr_compat_register_flash(&hal, 4096, 1, 0xFF);\n"
             "struct zms_fs fs = { .offset = 0, .sector_size = 4096, .sector_count = 4 };\n"
             "zms_mount(&fs);\n"
             "zms_write(&fs, 1, \"hello\", 5);\n"
@@ -858,17 +850,17 @@ RECIPES = {
             "frameworks/tym_setting/compat/tym_setting_log.h",
         ],
         "test_entry": "frameworks/tym_setting/test/main_tym_setting.c",
-        "requires": "flash_sim",
+        "requires": "flash_hal",
         "api": [
-            ("tym_setting_sim_setup(dev, base, capacity, erase_size)", "注入介质与分区（须在 SettingSrv_Init 前）"),
+            ("tym_setting_sim_setup(&hal, base, capacity, erase_size)", "注入介质与分区（须在 SettingSrv_Init 前）"),
             ("SettingSrv_Init()", "初始化并加载 RAM 镜像"),
             ("SettingSrv_Set(eSettingId, &data, len)", "写设置（O(1) 索引）"),
             ("SettingSrv_Get(eSettingId, &data, len)", "读设置"),
             ("SettingSrv_Flush() / idle 延时回写", "整页回写落盘"),
         ],
         "use_hint": (
-            "flash_dev_t *dev = flash_sim_init(&cfg);\n"
-            "tym_setting_sim_setup(dev, 0, 16 * 1024, 4096);\n"
+            "flash_hal_t hal; flash_hal_mem_create(64 * 1024, 4096, &hal);\n"
+            "tym_setting_sim_setup(&hal, 0, 16 * 1024, 4096);\n"
             "SettingSrv_Init();\n"
             "SettingSrv_Set(eSettingId_xxx, &val, sizeof(val));\n"
             "SettingSrv_Flush();   /* 或等待 idle 延时回写 */"
@@ -909,7 +901,7 @@ RECIPES = {
             "frameworks/fastflash/vendor/fast_flashdb_table/core/fast_flash_types.h",
         ],
         "test_entry": "frameworks/fastflash/test/main_fastflash.c",
-        "requires": "flash_sim",
+        "requires": "flash_hal",
         "api": [
             ("fast_flash_sim_init_device(bin_path)", "打开介质（按环境变量配置）"),
             ("fast_flash_init(&flash_ops, base, size)", "初始化并建表"),
@@ -918,8 +910,9 @@ RECIPES = {
             ("fast_flash_delete_table / 垃圾回收", "删除表 / 回收"),
         ],
         "use_hint": (
-            "flash_dev_t *dev = flash_sim_init(&cfg);\n"
-            "fast_flash_sim_init_device(\"fastflash.bin\");\n"
+            "flash_hal_t hal; flash_hal_mem_create(64 * 1024, 4096, &hal);\n"
+            "flash_hal_t hal; flash_hal_mem_create(2 * 1024 * 1024, 4096, &hal);\n"
+            "            fast_flash_port_init(&hal);\n"
             "fast_flash_init(&sim_flash_ops, 0, 16 * 1024);\n"
             "fast_flash_write_index(0, \"hello\", 5);\n"
             "char buf[32]; fast_flash_read_index(0, buf, &len);"
@@ -962,9 +955,9 @@ RECIPES = {
         ],
         "test_entry": "frameworks/nvdm/test/main_nvdm.c",
         "cflags": ["-DMTK_NVDM_ENABLE"],
-        "requires": "flash_sim",
+        "requires": "flash_hal",
         "api": [
-            ("nvdm_sim_setup(dev, base, capacity, peb_size, item_count)", "注入分区配置（须在 nvdm_init 前）"),
+            ("nvdm_sim_setup(&hal, base, capacity, peb_size, item_count)", "注入分区配置（须在 nvdm_init 前）"),
             ("nvdm_init()", "初始化（仅一次）"),
             ("nvdm_write_data_item(group, item, type, buf, size)", "写/更新"),
             ("nvdm_read_data_item(group, item, buf, &size)", "读（size 出入参）"),
@@ -972,8 +965,8 @@ RECIPES = {
             ("nvdm_query_space_information / nvdm_trigger_garbage_collection", "空间查询 / 主动 GC"),
         ],
         "use_hint": (
-            "flash_dev_t *dev = flash_sim_init(&cfg);\n"
-            "nvdm_sim_setup(dev, 0, 16 * 1024, 4096, 200);\n"
+            "flash_hal_t hal; flash_hal_mem_create(64 * 1024, 4096, &hal);\n"
+            "nvdm_sim_setup(&hal, 0, 16 * 1024, 4096, 200);\n"
             "nvdm_init();\n"
             "uint8_t buf[] = \"hello\";\n"
             "nvdm_write_data_item(\"app\", \"key\", NVDM_DATA_ITEM_TYPE_RAW_DATA, buf, 5);\n"
@@ -1066,12 +1059,14 @@ def _collect_files(recipe, kind):
             raise RuntimeError("源文件缺失: %s" % full)
         d, rel = _classify(fn, kind)
         files.append((d, rel, full))
-    # 统一 HAL 契约：core/flash_sim.c 为 PC 参考实现，include/flash_sim.h 为契约头。
-    # 二者不进 lib_sources（平台/目标侧提供真实实现），仅作参考与演示编译用。
-    files.append((DIR_CORE, "flash_sim.c",
-                  os.path.join(ROOT, "simulator", "flash_sim.c")))
-    files.append((DIR_INCLUDE, "flash_sim.h",
-                  os.path.join(ROOT, "simulator", "flash_sim.h")))
+    # 统一 HAL 契约：include/flash_hal.h 为平台无关契约头；
+    # core/flash_hal_mem.c/.h 为零依赖内存模拟介质（demo 与导入闭环用）。
+    files.append((DIR_INCLUDE, "flash_hal.h",
+                  os.path.join(ROOT, "frameworks", "common", "flash_hal.h")))
+    files.append((DIR_CORE, "flash_hal_mem.h",
+                  os.path.join(ROOT, "simulator", "flash_hal_mem.h")))
+    files.append((DIR_CORE, "flash_hal_mem.c",
+                  os.path.join(ROOT, "simulator", "flash_hal_mem.c")))
     seen = set()
     uniq = []
     for d, rel, full in files:
@@ -1125,11 +1120,11 @@ def _render_readme(fw_id, recipe, params, pkg):
         "## 目录结构（层次说明）\n\n"
         "```\n"
         "%s/\n"
-        "├── core/       框架核心（平台无关）或 HAL 参考实现 core/flash_sim.c\n"
+        "├── core/       框架核心（平台无关）或 HAL 参考实现 core/flash_hal_mem.c\n"
         "├── vendor/     开源/厂商源码（零修改，只读，不要改动）\n"
         "├── port/       平台移植层（目标平台替换/重写点）\n"
         "├── config/     配置文件模板（分区/几何参数）\n"
-        "├── include/    对外公共头 + HAL 契约头 include/flash_sim.h\n"
+        "├── include/    对外公共头 + HAL 契约头 include/flash_hal.h\n"
         "└── demo/       自检入口 test_main.c + 构建说明 BUILD.md\n"
         "```\n\n"
         "## 文档索引\n\n"
@@ -1148,36 +1143,46 @@ def _render_hal_contract(recipe, pkg):
         "# 统一适配接口契约（HAL Contract）\n\n"
         "## 1. 为什么有一份统一契约\n\n"
         "本平台所有存储框架（KV / 文件系统 / 裸机配置 / 环形缓冲）都通过 **同一套最小 "
-        "Flash 操作抽象** 访问介质，即 `include/flash_sim.h` 声明的接口。"
+        "Flash 操作抽象** 访问介质，即 `include/flash_hal.h` 声明的接口。"
         "因此**移植到任何目标平台，本质只有一件事**：\n\n"
         "> 按本契约实现 5 个 Flash 操作函数，对接目标 MCU 的真实 Flash 驱动。\n\n"
-        "## 2. 契约接口（include/flash_sim.h）\n\n"
-        "| 函数 | 语义 | 备注 |\n"
+        "## 2. 契约接口（include/flash_hal.h）\n\n"
+        "统一 HAL 是**注册式**：目标平台填充 `flash_hal_t`（三个回调 + 几何参数）后"
+        "注册给框架即可。\n\n"
+        "```c\n"
+        "typedef struct flash_hal {\n"
+        "    void       *ctx;        /* 驱动私有上下文 */\n"
+        "    uint32_t    total_size; /* 介质总容量（字节） */\n"
+        "    uint32_t    erase_size; /* 擦除块大小（字节） */\n"
+        "    uint32_t    write_size; /* 最小写单位（字节） */\n"
+        "    int (*read) (void *ctx, uint32_t off, void *buf, uint32_t len);\n"
+        "    int (*write)(void *ctx, uint32_t off, const void *buf, uint32_t len);\n"
+        "    int (*erase)(void *ctx, uint32_t off, uint32_t len);\n"
+        "} flash_hal_t;\n"
+        "```\n\n"
+        "| 回调 | 语义 | 备注 |\n"
         "|------|------|------|\n"
-        "| `flash_sim_init(cfg)` | 打开/初始化介质，返回句柄；失败返回 NULL | cfg 含几何/寿命/性能参数 |\n"
-        "| `flash_sim_read(dev, off, buf, len)` | 从 off 随机读 len 字节 | 任意粒度 |\n"
-        "| `flash_sim_write(dev, off, buf, len)` | 向 off 写 len 字节 | NOR/NAND 前须已擦除（仅 1->0） |\n"
-        "| `flash_sim_erase(dev, off, len)` | 按擦除块大小整块擦除 | 仅 NOR/NAND |\n"
-        "| `flash_sim_deinit(dev)` | 关闭介质 | |\n\n"
-        "配套类型/宏：`flash_type_t`、`flash_config_t`、`flash_err_t`、"
-        "`FLASH_CFG_DEFAULTS_BY_TYPE`；统计/磨损接口（`flash_sim_get_stats` / "
-        "`flash_sim_get_wear_map` / `flash_sim_block_count`）为非移植必需的可选接口。\n\n"
+        "| `read(ctx, off, buf, len)` | 从 off 随机读 len 字节 | 任意粒度 |\n"
+        "| `write(ctx, off, buf, len)` | 向 off 写 len 字节 | NOR/NAND 前须已擦除（仅 1->0） |\n"
+        "| `erase(ctx, off, len)` | 按 `erase_size` 对齐整块擦除 | off/len 须块对齐；EEPROM 可不支持 |\n\n"
+        "错误码见 `flash_hal_err_t`（`FLASH_HAL_ERR_ARGS/RANGE/ERASE/WRITE/NOTSUP/IO`），"
+        "0 表示成功。`core/flash_hal_mem.c` 为 PC 参考实现（内存介质）。\n\n"
         "## 3. 契约语义要点（移植时务必满足）\n\n"
         "- **写前擦除**：NOR/NAND 写入仅允许 1->0，写前区域必须已擦除（全 0xFF）。\n"
         "- **擦除粒度**：必须按 `erase_size` 对齐整块擦除；框架按此规划分区。\n"
         "- **对齐**：分区基址/容量须为 `erase_size` 整数倍。\n"
-        "- **返回码**：0 成功；负值错误码（见 `flash_err_t`：ARGS/RANGE/ERASE/WRITE/NOTSUP/IO）。\n"
-        "- **参考实现**：`core/flash_sim.c` 是本契约在 PC 上的参考实现（BIN 文件仿真），"
+        "- **返回码**：0 成功；负值错误码（见 `flash_hal_err_t`）。\n"
+        "- **参考实现**：`core/flash_hal_mem.c` 是本契约的零依赖参考实现（内存介质），"
         "移植时把同样的语义映射到真实驱动即可。\n\n"
         "## 4. 本框架（%s）的接口映射\n\n"
         "%s\n\n"
         "移植层源码见 `port/` 目录；`vendor/` 为框架本体（零修改，只读）。\n\n"
         "## 5. 移植建议\n\n"
         "- 目标 Flash 驱动通常是 读(addr, buf, len) / 写(addr, buf, len) / 擦除(addr, len)，"
-        "在 `port/` 移植层做一层适配即可。\n"
+        "按 `flash_hal_t` 填好三个回调即可。\n"
         "- 若目标平台已有成熟 Flash 抽象（如 RT-Thread FAL、Zephyr flash API、裸机 SPI 驱动），"
-        "把契约函数桥接到对应 API。\n"
-        "- 不要修改 `vendor/`；`core/` 中除 `flash_sim.c` 外的框架核心代码也不要改。\n"
+        "把回调桥接到对应 API。\n"
+        "- 不要修改 `vendor/`；`core/` 中除 `flash_hal_mem.c`（参考实现，可替换）外不要改。\n"
         "- 让 `AI_PORTING_PROMPT.md` 指引目标工程里的 AI 完成剩余适配。\n"
     ) % (title, hal_map)
 
@@ -1199,11 +1204,11 @@ def _render_porting(fw_id, recipe, params, pkg):
     vendor_count = sum(1 for d, _, _ in pkg["files"] if d == DIR_VENDOR)
 
     api_map = {
-        KIND_SELF: "本框架直接调用统一契约接口（`flash_sim_read/write/erase`）。"
-                   "目标平台只需按 `include/flash_sim.h` 实现真实驱动。",
+        KIND_SELF: "本框架直接调用统一契约接口（`hal->read/write/erase`）。"
+                   "目标平台只需按 `include/flash_hal.h` 实现真实驱动。",
         KIND_VENDOR: "本框架通过 `port/` 下的移植层访问统一契约接口："
                      "vendor 源码零修改，移植层将框架原生底层接口（回调/diskio/ops）"
-                     "桥接到 `flash_sim_*`。详见 `HAL_CONTRACT.md`。",
+                     "桥接到 `hal->read/write/erase`。详见 `HAL_CONTRACT.md`。",
         KIND_ZEPHYR: "本框架 vendor 使用 Zephyr 风格 API（`<zephyr/...>`），"
                      "`port/` 下的 zephyr_compat 兼容层将其桥接到统一契约接口。"
                      "vendor 源码零修改。详见 `HAL_CONTRACT.md`。",
@@ -1227,11 +1232,11 @@ def _render_porting(fw_id, recipe, params, pkg):
         "## 2. 包结构（层次说明）\n\n"
         "```\n"
         "%s/\n"
-        "├── core/       框架核心（平台无关）或 HAL 参考实现 core/flash_sim.c\n"
+        "├── core/       框架核心（平台无关）或 HAL 参考实现 core/flash_hal_mem.c\n"
         "├── vendor/     开源/厂商源码（零修改，只读）\n"
         "├── port/       平台移植层（目标平台替换/重写点）\n"
         "├── config/     配置文件模板（分区/几何参数）\n"
-        "├── include/    对外公共头 + HAL 契约头 include/flash_sim.h\n"
+        "├── include/    对外公共头 + HAL 契约头 include/flash_hal.h\n"
         "└── demo/       自检入口 test_main.c + 构建说明 BUILD.md\n"
         "```\n\n"
         "### 文件清单\n\n"
@@ -1253,7 +1258,7 @@ def _render_porting(fw_id, recipe, params, pkg):
         "## 7. OS/库依赖\n\n"
         "- 内存：%s\n"
         "- 锁/多线程：本平台仿真为单线程；多线程环境需自行加锁（见 port/ 层注释）。\n"
-        "- 时间：无强依赖（本平台仿真通过 flash_sim 注入耗时）。\n"
+        "- 时间：无强依赖（目标平台驱动按其实现处理耗时/超时）。\n"
         "- 日志：port/ 层默认输出到 stdout；目标平台替换为你的日志接口。\n"
         "- C 标准：C99（`-std=c99`）。\n\n"
         "## 8. 编译与集成\n\n"
@@ -1305,11 +1310,11 @@ def _render_ai_prompt(fw_id, recipe, params, pkg):
         "移植到本工程并接入使用，使其能在目标硬件上稳定运行。\n\n"
         "## 输入\n\n"
         "1. **本库包**（当前目录）：已按 `core/vendor/port/config/include/demo` 分层组织：\n"
-        "   - `core/`：框架核心（平台无关）或 HAL 参考实现 `core/flash_sim.c`（PC 仿真，仅供对照语义）。\n"
+        "   - `core/`：框架核心（平台无关）或 HAL 参考实现 `core/flash_hal_mem.c`（PC 仿真，仅供对照语义）。\n"
         "   - `vendor/`：框架本体源码（**零修改，只读**，不要改它的任何注释/格式/逻辑）。\n"
         "   - `port/`：平台移植层（**你的主要工作点**）。\n"
         "   - `config/`：配置文件模板（分区/几何参数）。\n"
-        "   - `include/`：对外公共头 + HAL 契约头 `include/flash_sim.h`。\n"
+        "   - `include/`：对外公共头 + HAL 契约头 `include/flash_hal.h`。\n"
         "   - `demo/`：`test_main.c` 自检用例 + `BUILD.md` 构建说明。\n"
         "   - `PORTING.md`、`HAL_CONTRACT.md`：完整规格。\n"
         "2. **目标工程上下文**（由你自行在本工程中查找）：\n"
@@ -1320,10 +1325,10 @@ def _render_ai_prompt(fw_id, recipe, params, pkg):
         "## 移植步骤\n\n"
         "1. **读规格**：通读 `PORTING.md` 与 `HAL_CONTRACT.md`，确认对外 API 与 HAL 契约。\n"
         "2. **实现 HAL 或重写移植层**：\n"
-        "   - 若本包是自研框架（直接使用契约）：按 `include/flash_sim.h` 实现 5 个函数"
+        "   - 若本包是自研框架（直接使用契约）：按 `include/flash_hal.h` 实现 5 个函数"
         "（init/read/write/erase/deinit），对接目标 Flash 驱动；\n"
-        "   - 若本包带移植层（`port/`）：把移植层对 `flash_sim_*` 的调用改写为目标驱动调用，"
-        "或直接按契约实现 `flash_sim_*` 后复用移植层。\n"
+        "   - 若本包带移植层（`port/`）：把移植层对 `hal->read/write/erase` 的调用改写为目标驱动调用，"
+        "或直接按契约实现 `hal->read/write/erase` 后复用移植层。\n"
         "3. **配置参数**：按 `PORTING.md` 第 5 节与目标 flash_map，调整 `config/` 中的分区/几何"
         "参数（基址、容量、擦除块大小、条目数上限等）。\n"
         "4. **接入构建**：把 `PORTING.md` 第 8 节的源文件清单、包含目录、-D 宏加入目标构建系统；"
@@ -1333,7 +1338,7 @@ def _render_ai_prompt(fw_id, recipe, params, pkg):
         "6. **收尾**：把实际改动与最终分区取值回填到本目录 `PORTING.md`（第 5/8 节），便于后续维护。\n\n"
         "## 硬性约束\n\n"
         "- `vendor/` **零修改**：禁止改动其任何内容；需要调整行为时改 `port/` 层或 `config/`。\n"
-        "- `core/` 中除 `flash_sim.c`（参考实现，可替换）外的框架核心代码不要改。\n"
+        "- `core/` 中除 `flash_hal_mem.c`（参考实现，可替换）外的框架核心代码不要改。\n"
         "- 遵循目标工程的代码风格与既有抽象；优先复用目标工程已有的驱动封装。\n"
         "- 内存安全：检查边界、释放后置 NULL、不越界；按目标平台规范处理。\n"
         "- 所有返回码必须检查；不得吞掉错误。\n"
@@ -1361,111 +1366,370 @@ def _render_build_md(recipe, pkg):
     cmd = _build_cmd_line(recipe, pkg)
     return (
         "# 构建与运行（demo 冒烟验证）\n\n"
-        "在**本包根目录**执行（依赖本包自带的 `core/flash_sim.c` 参考实现，无需外部库）：\n\n"
+        "在**本包根目录**执行（依赖本包自带的 `core/flash_hal_mem.c` 参考实现，无需外部库）：\n\n"
         "```bash\n"
         "%s\n"
         "./demo_test\n"
         "```\n\n"
         "说明：\n"
-        "- `core/flash_sim.c` 是统一契约的 PC 参考实现（BIN 文件仿真）；\n"
-        "- 移植到真实硬件后，替换 `core/flash_sim.c` 为你的真实驱动实现（或改写 `port/` 层），"
+        "- `core/flash_hal_mem.c` 是统一契约的 PC 参考实现（BIN 文件仿真）；\n"
+        "- 移植到真实硬件后，替换 `core/flash_hal_mem.c` 为你的真实驱动实现（或改写 `port/` 层），"
         "demo 与框架逻辑不变；\n"
         "- 各框架测试项/参数见 `test_main.c` 头部注释（环境变量驱动，PC 下可省略）。\n"
     ) % cmd
 
 
 def _render_test_main(fw_id, recipe, params):
-    """生成参数化的标准自检入口 demo/test_main.c（用占位符 replace，避免 % 冲突）。"""
+    """生成参数化的 demo/test_main.c（基于零依赖内存 HAL，平台无关）。
+
+    demo 用 core/flash_hal_mem.c 的内存介质驱动框架，不依赖任何平台代码，
+    可在 PC 直接编译运行；移植到目标时仅需把 flash_hal_mem_create 替换为
+    真实驱动的 flash_hal_t 注册。
+    """
     capacity = int(params.get("capacity", 8192))
-    page_size = int(params.get("page_size", 256))
     erase_size = int(params.get("erase_size", 4096))
-    lib = recipe["lib_name"]
     title = recipe["title"]
-    if fw_id == "kv":
-        tpl = (
-            "/* 自动生成的自检入口：对接模拟基座验证 __TITLE__ 库 */\n"
-            "#include \"flash_sim.h\"\n"
-            "#include \"__LIB__.h\"\n"
-            "#include <stdio.h>\n"
-            "#include <string.h>\n\n"
-            "#define KV_CAPACITY __CAPACITY__\n"
-            "#define KV_ERASE_SIZE __ERASE_SIZE__\n"
-            "#define BIN_PATH \"imported_kv_demo.bin\"\n\n"
-            "static int g_fail = 0;\n"
-            "static void expect(const char *name, int cond) {\n"
-            "    printf(\"  [%s] %s\\n\", cond ? \"OK  \" : \"FAIL\", name);\n"
-            "    if (!cond) g_fail++;\n"
-            "}\n\n"
-            "int main(void) {\n"
-            "    printf(\"=== 导入库运行验证: __TITLE__ (cap=__CAPACITY__) ===\\n\");\n"
-            "    flash_config_t cfg = {\n"
-            "        .type = FLASH_TYPE_NOR, .total_size = 64*1024,\n"
-            "        .erase_size = KV_ERASE_SIZE, .write_size = 1, .read_size = 1,\n"
-            "        .erase_cycles = 100000, .bin_path = BIN_PATH };\n"
-            "    flash_dev_t *dev = flash_sim_init(&cfg);\n"
-            "    if (!dev) { printf(\"flash init failed\\n\"); return 1; }\n"
-            "    flash_sim_erase(dev, 0, KV_CAPACITY);\n"
-            "    kv_init(dev, 0, KV_CAPACITY);\n"
-            "    const char *v = \"hello-imported\";\n"
-            "    expect(\"kv_write\", kv_write(dev, 1, v, (uint16_t)strlen(v)) == FLASH_OK);\n"
-            "    char rb[32] = {0}; uint16_t rl = sizeof(rb);\n"
-            "    expect(\"kv_read\", kv_read(dev, 1, rb, &rl) == FLASH_OK);\n"
-            "    expect(\"kv_data_match\", rl == strlen(v) && memcmp(rb, v, rl) == 0);\n"
-            "    int32_t n = 0xCAFEBABE; uint16_t rn = sizeof(n);\n"
-            "    expect(\"kv_write_int\", kv_write(dev, 2, &n, sizeof(n)) == FLASH_OK);\n"
-            "    int32_t rn2 = 0; uint16_t rnl = sizeof(rn2);\n"
-            "    expect(\"kv_read_int\", kv_read(dev, 2, &rn2, &rnl) == FLASH_OK);\n"
-            "    expect(\"kv_int_match\", rn2 == n);\n"
-            "    expect(\"kv_delete\", kv_delete(dev, 1) == FLASH_OK);\n"
-            "    uint16_t dl = 4;\n"
-            "    expect(\"kv_read_deleted\", kv_read(dev, 1, NULL, &dl) == FLASH_ERR_ARGS);\n"
-            "    flash_sim_deinit(dev);\n"
-            "    printf(\"\\n=== 导入库验证结果: %s ===\\n\", g_fail == 0 ? \"全部通过\" : \"存在失败\");\n"
-            "    return g_fail == 0 ? 0 : 1;\n"
-            "}\n"
-        )
-        return (tpl
-                .replace("__TITLE__", title)
-                .replace("__LIB__", lib)
-                .replace("__CAPACITY__", str(capacity))
-                .replace("__ERASE_SIZE__", str(erase_size)))
-    # simulator 自检入口
-    tpl = (
-        "/* 自动生成的自检入口：验证 flash_sim 基座库 */\n"
-        "#include \"flash_sim.h\"\n"
+
+    PRE = (
+        "/* 自动生成的 demo（平台无关）：用内存模拟 HAL（core/flash_hal_mem.c）"
+        "驱动库，可直接在 PC 编译运行。\n"
+        " * 移植：把 flash_hal_mem_create(...) 换成目标 Flash 驱动的 "
+        "flash_hal_t 注册即可。 */\n"
+        '#include "flash_hal.h"\n'
+        '#include "flash_hal_mem.h"\n'
         "#include <stdio.h>\n"
-        "#include <string.h>\n\n"
-        "#define BIN_PATH \"imported_sim_demo.bin\"\n\n"
-        "static int g_fail = 0;\n"
-        "static void expect(const char *name, int cond) {\n"
-        "    printf(\"  [%s] %s\\n\", cond ? \"OK  \" : \"FAIL\", name);\n"
-        "    if (!cond) g_fail++;\n"
-        "}\n\n"
-        "int main(void) {\n"
-        "    printf(\"=== 导入库运行验证: __TITLE__ ===\\n\");\n"
-        "    flash_config_t cfg = {\n"
-        "        .type = FLASH_TYPE_NOR, .total_size = 64*1024,\n"
-        "        .erase_size = __ERASE_SIZE__, .write_size = 1, .read_size = 1,\n"
-        "        .erase_cycles = 100000, .bin_path = BIN_PATH };\n"
-        "    flash_dev_t *dev = flash_sim_init(&cfg);\n"
-        "    if (!dev) { printf(\"init failed\\n\"); return 1; }\n"
-        "    uint8_t w[16]; for (int i=0;i<16;i++) w[i]=(uint8_t)(0xA0+i);\n"
-        "    uint8_t r[16]={0};\n"
-        "    expect(\"erase\", flash_sim_erase(dev,0,cfg.erase_size)==FLASH_OK);\n"
-        "    expect(\"write\", flash_sim_write(dev,0,w,16)==FLASH_OK);\n"
-        "    expect(\"read\", flash_sim_read(dev,0,r,16)==FLASH_OK);\n"
-        "    expect(\"match\", memcmp(w,r,16)==0);\n"
-        "    flash_sim_deinit(dev);\n"
-        "    printf(\"\\n=== 导入库验证结果: %s ===\\n\", g_fail==0?\"全部通过\":\"存在失败\");\n"
-        "    return g_fail==0?0:1;\n"
+        "#include <string.h>\n"
+    )
+
+    INC = {
+        "kv": ('#include "kv_store.h"\n\n'),
+        "simulator": ("\n"),
+        "baremetal": ('#include "bm_config.h"\n'
+                      "typedef struct { uint32_t magic; uint32_t vol; } app_cfg_t;\n\n"),
+        "fs": ('#include "fs_store.h"\n\n'),
+        "easyflash": ('#include "ef_port.h"\n'
+                      '#include "easyflash.h"\n\n'),
+        "flashdb": ('#include "fal_flash_sim_port.h"\n'
+                    '#include "flashdb.h"\n\n'),
+        "littlefs": ('#include "littlefs_sim_port.h"\n'
+                     '#include "lfs.h"\n\n'),
+        "fatfs": ('#include "fatfs_sim_port.h"\n'
+                  '#include "ff.h"\n\n'),
+        "spiffs": ('#include "spiffs_sim_port.h"\n'
+                   '#include "spiffs.h"\n\n'),
+        "yaffs": ('#include "yaffs_sim_port.h"\n'
+                  '#include "yaffsfs.h"\n\n'),
+        "fcb": ('#include "zephyr_compat.h"\n'
+                '#include <zephyr/fs/fcb.h>\n'
+                "static struct flash_sector s_sec[8];\n\n"),
+        "nvs": ('#include "zephyr_compat.h"\n'
+                '#include <zephyr/kvss/nvs.h>\n\n'),
+        "zms": ('#include "zephyr_compat.h"\n'
+                '#include <zephyr/kvss/zms.h>\n\n'),
+        "tym_setting": ('#include "app_setting_idle_activity.h"\n'
+                        '#include "SettingSrv_priv.h"\n'
+                        '#include "tym_setting_sim_port.h"\n\n'),
+        "fastflash": ('#include "fastflash_sim_port.h"\n'
+                      '#include "fast_flash_core.h"\n'
+                      "typedef struct { uint32_t a; uint32_t b; } rec_t;\n\n"),
+        "nvdm": ('#include "nvdm_sim_port.h"\n'
+                 '#include "nvdm.h"\n'
+                 '#define NVDM_GROUP "demo"\n\n'),
+    }
+
+    BODY = {
+        "kv": (
+            "    kv_init(&hal, 0, __CAP__);\n"
+            "    const char *v = \"hello-demo\";\n"
+            "    expect(\"kv_write\", kv_write(&hal, 1, v, "
+            "(uint16_t)strlen(v)) == 0);\n"
+            "    char rb[32] = {0}; uint16_t rl = sizeof(rb);\n"
+            "    expect(\"kv_read\", kv_read(&hal, 1, rb, &rl) == 0);\n"
+            "    expect(\"kv_match\", rl == strlen(v) && memcmp(rb, v, rl) == 0);\n"
+            "    expect(\"kv_delete\", kv_delete(&hal, 1) == 0);\n"
+        ),
+        "simulator": (
+            "    uint8_t w[16], r[16] = {0};\n"
+            "    for (int i = 0; i < 16; i++) { w[i] = (uint8_t)(0xA0 + i); }\n"
+            "    expect(\"erase\", hal.erase(hal.ctx, 0, __ERASE__) == 0);\n"
+            "    expect(\"write\", hal.write(hal.ctx, 0, w, 16) == 0);\n"
+            "    expect(\"read\", hal.read(hal.ctx, 0, r, 16) == 0);\n"
+            "    expect(\"match\", memcmp(w, r, 16) == 0);\n"
+        ),
+        "baremetal": (
+            "    bm_config_t ctx;\n"
+            "    app_cfg_t cfg = {0xAA55u, 60u};\n"
+            "    expect(\"bm_init\", bm_config_init(&ctx, &hal, 0, "
+            "__ERASE__, __ERASE__, sizeof(app_cfg_t)) == 0);\n"
+            "    expect(\"bm_save\", bm_config_save(&ctx, &cfg) == 0);\n"
+            "    app_cfg_t out = {0};\n"
+            "    expect(\"bm_load\", bm_config_load(&ctx, &out) == 0);\n"
+            "    expect(\"bm_match\", out.magic == cfg.magic && out.vol == cfg.vol);\n"
+        ),
+        "fs": (
+            "    expect(\"fs_format\", fs_format(&hal, 0, __CAP__, "
+            "__ERASE__) == FS_OK);\n"
+            "    const char *msg = \"hello-fs\";\n"
+            "    expect(\"fs_create\", fs_create(&hal, \"a.txt\") == FS_OK);\n"
+            "    expect(\"fs_write\", fs_write(&hal, \"a.txt\", msg, "
+            "strlen(msg)) == FS_OK);\n"
+            "    char rb[64] = {0}; uint32_t len = sizeof(rb);\n"
+            "    expect(\"fs_read\", fs_read(&hal, \"a.txt\", rb, 0, &len) == FS_OK);\n"
+            "    expect(\"fs_match\", len == strlen(msg) && memcmp(rb, msg, len) == 0);\n"
+            "    expect(\"fs_delete\", fs_delete(&hal, \"a.txt\") == FS_OK);\n"
+        ),
+        "easyflash": (
+            "    uint32_t eflen = __CAP__ < 16384 ? 16384 : __CAP__;\n"
+            "    ef_port_setup(&hal, 0, eflen, __ERASE__, 0);\n"
+            "    expect(\"easyflash_init\", easyflash_init() == EF_NO_ERR);\n"
+            "    expect(\"ef_set\", ef_set_env(\"key\", \"value\") == EF_NO_ERR);\n"
+            "    expect(\"ef_get\", ef_get_env(\"key\") "
+            "&& strcmp(ef_get_env(\"key\"), \"value\") == 0);\n"
+            "    expect(\"ef_del\", ef_del_env(\"key\") == EF_NO_ERR);\n"
+        ),
+        "flashdb": (
+            "    expect(\"fal_init\", fal_sim_port_init(&hal, __TOTAL__, "
+            "__ERASE__, 0, __CAP__, 0) == 0);\n"
+            "    struct fdb_kvdb db;\n"
+            "    memset(&db, 0, sizeof(db));\n"
+            "    expect(\"kvdb_init\", fdb_kvdb_init(&db, \"demo\", "
+            "FAL_KVDB_PART_NAME, NULL, NULL) == FDB_NO_ERR);\n"
+            "    expect(\"fdb_set\", fdb_kv_set(&db, \"key\", \"value\") == FDB_NO_ERR);\n"
+            "    char *vv = fdb_kv_get(&db, \"key\");\n"
+            "    expect(\"fdb_get\", vv && strcmp(vv, \"value\") == 0);\n"
+            "    expect(\"fdb_del\", fdb_kv_del(&db, \"key\") == FDB_NO_ERR);\n"
+        ),
+        "littlefs": (
+            "    struct lfs_config lc;\n"
+            "    expect(\"port_init\", littlefs_port_init(&hal, 0, &lc) == 0);\n"
+            "    lfs_t lfs;\n"
+            "    expect(\"lfs_format\", lfs_format(&lfs, &lc) == LFS_ERR_OK);\n"
+            "    expect(\"lfs_mount\", lfs_mount(&lfs, &lc) == LFS_ERR_OK);\n"
+            "    lfs_file_t f;\n"
+            "    expect(\"lfs_open\", lfs_file_open(&lfs, &f, \"a.txt\", "
+            "LFS_O_RDWR | LFS_O_CREAT) == LFS_ERR_OK);\n"
+            "    const char *msg = \"hello-lfs\";\n"
+            "    expect(\"lfs_write\", lfs_file_write(&lfs, &f, msg, strlen(msg)) "
+            "== (lfs_ssize_t)strlen(msg));\n"
+            "    lfs_file_close(&lfs, &f);\n"
+            "    expect(\"lfs_reopen\", lfs_file_open(&lfs, &f, \"a.txt\", "
+            "LFS_O_RDONLY) == LFS_ERR_OK);\n"
+            "    char rb[64] = {0};\n"
+            "    expect(\"lfs_read\", lfs_file_read(&lfs, &f, rb, sizeof(rb)) "
+            "== (lfs_ssize_t)strlen(msg));\n"
+            "    expect(\"lfs_match\", memcmp(rb, msg, strlen(msg)) == 0);\n"
+            "    lfs_file_close(&lfs, &f);\n"
+            "    lfs_unmount(&lfs);\n"
+        ),
+        "fatfs": (
+            "    expect(\"port_init\", fatfs_port_init(&hal, 0) == 0);\n"
+            "    FATFS fs; BYTE work[4096];\n"
+            "    MKFS_PARM mk; memset(&mk, 0, sizeof(mk)); mk.fmt = FM_FAT | FM_SFD;\n"
+            "    expect(\"f_mkfs\", f_mkfs(\"\", &mk, work, sizeof(work)) == FR_OK);\n"
+            "    expect(\"f_mount\", f_mount(&fs, \"\", 1) == FR_OK);\n"
+            "    FIL fil;\n"
+            "    expect(\"f_open\", f_open(&fil, \"a.txt\", "
+            "FA_WRITE | FA_CREATE_ALWAYS) == FR_OK);\n"
+            "    const char *msg = \"hello-fat\"; UINT bw = 0;\n"
+            "    expect(\"f_write\", f_write(&fil, msg, strlen(msg), &bw) == FR_OK "
+            "&& bw == strlen(msg));\n"
+            "    f_close(&fil);\n"
+            "    expect(\"f_reopen\", f_open(&fil, \"a.txt\", FA_READ) == FR_OK);\n"
+            "    char rb[64] = {0}; UINT br = 0;\n"
+            "    expect(\"f_read\", f_read(&fil, rb, sizeof(rb), &br) == FR_OK);\n"
+            "    expect(\"f_match\", br == strlen(msg) && memcmp(rb, msg, br) == 0);\n"
+            "    f_close(&fil);\n"
+            "    f_mount(NULL, \"\", 0);\n"
+        ),
+        "spiffs": (
+            "    expect(\"port_init\", spiffs_port_init(&hal) == 0);\n"
+            "    s32_t rc = spiffs_sim_mount();\n"
+            "    if (rc != SPIFFS_OK) {\n"
+            "        expect(\"spiffs_format\", spiffs_sim_format() == SPIFFS_OK);\n"
+            "        rc = spiffs_sim_mount();\n"
+            "    }\n"
+            "    expect(\"spiffs_mount\", rc == SPIFFS_OK);\n"
+            "    spiffs *fs = (spiffs *)spiffs_sim_fs();\n"
+            "    spiffs_file fd = SPIFFS_open(fs, \"a.txt\", "
+            "SPIFFS_CREAT | SPIFFS_TRUNC | SPIFFS_RDWR, 0);\n"
+            "    expect(\"spiffs_open\", fd > 0);\n"
+            "    const char *msg = \"hello-spiffs\";\n"
+            "    expect(\"spiffs_write\", SPIFFS_write(fs, fd, msg, strlen(msg)) "
+            "== (s32_t)strlen(msg));\n"
+            "    SPIFFS_close(fs, fd);\n"
+            "    fd = SPIFFS_open(fs, \"a.txt\", SPIFFS_RDONLY, 0);\n"
+            "    char rb[64] = {0};\n"
+            "    expect(\"spiffs_read\", SPIFFS_read(fs, fd, rb, sizeof(rb)) "
+            "== (s32_t)strlen(msg));\n"
+            "    expect(\"spiffs_match\", memcmp(rb, msg, strlen(msg)) == 0);\n"
+            "    SPIFFS_close(fs, fd);\n"
+            "    spiffs_sim_unmount();\n"
+        ),
+        "yaffs": (
+            "    expect(\"port_init\", yaffs_port_init(&hal) == 0);\n"
+            "    expect(\"yaffs_startup\", yaffs_sim_start_up() == 0);\n"
+            "    expect(\"yaffs_mount\", yaffs_mount(\"/flash\") == 0);\n"
+            "    int fd = yaffs_open(\"/flash/a.txt\", O_CREAT | O_RDWR, 0666);\n"
+            "    expect(\"yaffs_open\", fd >= 0);\n"
+            "    const char *msg = \"hello-yaffs\";\n"
+            "    expect(\"yaffs_write\", yaffs_write(fd, msg, strlen(msg)) "
+            "== (int)strlen(msg));\n"
+            "    yaffs_close(fd);\n"
+            "    fd = yaffs_open(\"/flash/a.txt\", O_RDONLY, 0);\n"
+            "    char rb[64] = {0};\n"
+            "    expect(\"yaffs_read\", yaffs_read(fd, rb, sizeof(rb)) "
+            "== (int)strlen(msg));\n"
+            "    expect(\"yaffs_match\", memcmp(rb, msg, strlen(msg)) == 0);\n"
+            "    yaffs_close(fd);\n"
+        ),
+        "fcb": (
+            "    const struct device *zdev = "
+            "zephyr_compat_register_flash(&hal, __ERASE__, 1, 0xFF);\n"
+            "    zephyr_compat_register_area(0, zdev, 0, __CAP__);\n"
+            "    struct fcb f;\n"
+            "    memset(&f, 0, sizeof(f));\n"
+            "    f.f_magic = 0x1234abcd; f.f_version = 1;\n"
+            "    uint32_t nsec = __CAP__ / __ERASE__;\n"
+            "    f.f_sector_cnt = (uint16_t)nsec; f.f_scratch_cnt = 1;\n"
+            "    for (uint32_t i = 0; i < nsec; i++) {\n"
+            "        s_sec[i].fs_off = (off_t)i * __ERASE__;\n"
+            "        s_sec[i].fs_size = __ERASE__;\n"
+            "    }\n"
+            "    f.f_sectors = s_sec;\n"
+            "    expect(\"fcb_init\", fcb_init(0, &f) == 0);\n"
+            "    uint8_t data[8] = {1,2,3,4,5,6,7,8};\n"
+            "    struct fcb_entry loc;\n"
+            "    expect(\"fcb_append\", fcb_append(&f, 8, &loc) == 0);\n"
+            "    expect(\"fcb_data\", flash_area_write(f.fap, "
+            "FCB_ENTRY_FA_DATA_OFF(loc), data, 8) == 0);\n"
+            "    expect(\"fcb_commit\", fcb_append_finish(&f, &loc) == 0);\n"
+            "    struct fcb_entry it;\n"
+            "    memset(&it, 0, sizeof(it));\n"
+            "    int cnt = 0;\n"
+            "    while (fcb_getnext(&f, &it) == 0) { cnt++; if (cnt > 16) break; }\n"
+            "    expect(\"fcb_walk\", cnt >= 1);\n"
+        ),
+        "nvs": (
+            "    const struct device *zdev = "
+            "zephyr_compat_register_flash(&hal, __ERASE__, 1, 0xFF);\n"
+            "    struct nvs_fs fs;\n"
+            "    memset(&fs, 0, sizeof(fs));\n"
+            "    fs.offset = 0; fs.sector_size = __ERASE__; "
+            "fs.sector_count = (uint16_t)(__CAP__ / __ERASE__); "
+            "fs.flash_device = zdev;\n"
+            "    expect(\"nvs_mount\", nvs_mount(&fs) == 0);\n"
+            "    const char *v = \"hello-nvs\";\n"
+            "    expect(\"nvs_write\", nvs_write(&fs, 1, v, strlen(v)) >= 0);\n"
+            "    char rb[32] = {0};\n"
+            "    expect(\"nvs_read\", nvs_read(&fs, 1, rb, sizeof(rb)) "
+            "== (ssize_t)strlen(v));\n"
+            "    expect(\"nvs_match\", memcmp(rb, v, strlen(v)) == 0);\n"
+        ),
+        "zms": (
+            "    const struct device *zdev = "
+            "zephyr_compat_register_flash(&hal, __ERASE__, 1, 0xFF);\n"
+            "    struct zms_fs fs;\n"
+            "    memset(&fs, 0, sizeof(fs));\n"
+            "    fs.offset = 0; fs.sector_size = __ERASE__; "
+            "fs.sector_count = (uint16_t)(__CAP__ / __ERASE__); "
+            "fs.flash_device = zdev;\n"
+            "    expect(\"zms_mount\", zms_mount(&fs) == 0);\n"
+            "    const char *v = \"hello-zms\";\n"
+            "    expect(\"zms_write\", zms_write(&fs, 1, v, strlen(v)) >= 0);\n"
+            "    char rb[32] = {0};\n"
+            "    expect(\"zms_read\", zms_read(&fs, 1, rb, sizeof(rb)) "
+            "== (ssize_t)strlen(v));\n"
+            "    expect(\"zms_match\", memcmp(rb, v, strlen(v)) == 0);\n"
+        ),
+        "tym_setting": (
+            "    tym_setting_sim_setup(&hal, 0, __CAP__, __ERASE__);\n"
+            "    tym_setting_sim_erase_all();\n"
+            "    SettingSrv_Init();\n"
+            "    uint32_t vol = 60;\n"
+            "    Setting_Set(SETID_MASTER_VOL, &vol);\n"
+            "    expect(\"tym_ready\", Setting_IsReady(SETID_MASTER_VOL) == TRUE);\n"
+            "    expect(\"tym_get\", *(const uint32_t *)Setting_Get(SETID_MASTER_VOL) == vol);\n"
+        ),
+        "fastflash": (
+            "    expect(\"port_init\", fast_flash_port_init(&hal) == 0);\n"
+            "    expect(\"ff_init\", fast_flash_init(&sim_flash_ops, "
+            "__TOTAL__, true) == 0);\n"
+            "    rec_t rec = {0x11, 0x22};\n"
+            "    expect(\"ff_create\", fast_flash_create_table(\"demo\", "
+            "sizeof(rec_t), 32) == 0);\n"
+            "    expect(\"ff_append\", fast_flash_append_table_data(\"demo\", "
+            "&rec, sizeof(rec)) == 0);\n"
+            "    rec_t rb = {0};\n"
+            "    expect(\"ff_read\", fast_flash_read_table_data(\"demo\", 0, "
+            "&rb, sizeof(rb)) == 0);\n"
+            "    expect(\"ff_match\", rb.a == rec.a && rb.b == rec.b);\n"
+        ),
+        "nvdm": (
+            "    nvdm_sim_setup(&hal, 0, __CAP__, __ERASE__, 100);\n"
+            "    expect(\"nvdm_init\", nvdm_init() == NVDM_STATUS_OK);\n"
+            "    const char *data = \"hello-nvdm\";\n"
+            "    expect(\"nvdm_write\", nvdm_write_data_item(NVDM_GROUP, \"key\", "
+            "NVDM_DATA_ITEM_TYPE_RAW_DATA, data, strlen(data)) == NVDM_STATUS_OK);\n"
+            "    char rb[32] = {0}; uint32_t rl = sizeof(rb);\n"
+            "    expect(\"nvdm_read\", nvdm_read_data_item(NVDM_GROUP, \"key\", "
+            "rb, &rl) == NVDM_STATUS_OK);\n"
+            "    expect(\"nvdm_match\", rl == strlen(data) && memcmp(rb, data, rl) == 0);\n"
+        ),
+    }
+
+    MAIN = (
+        "int main(void)\n"
+        "{\n"
+        "    printf(\"=== demo: __TITLE__ ===\\n\");\n"
+        "    flash_hal_t hal;\n"
+        "    if (flash_hal_mem_create(__TOTAL__, __ERASE__, &hal) != 0) {\n"
+        "        printf(\"内存介质创建失败\\n\");\n"
+        "        return 1;\n"
+        "    }\n"
+    )
+    FOOT = (
+        "    flash_hal_mem_destroy(&hal);\n"
+        "    printf(\"\\n=== demo 结果: %s ===\\n\", "
+        "g_fail == 0 ? \"全部通过\" : \"存在失败\");\n"
+        "    return g_fail == 0 ? 0 : 1;\n"
         "}\n"
     )
-    return tpl.replace("__TITLE__", title).replace("__ERASE_SIZE__", str(erase_size))
+    EX = (
+        "static int g_fail = 0;\n"
+        "static void expect(const char *name, int cond)\n"
+        "{\n"
+        "    printf(\"  [%s] %s\\n\", cond ? \"OK  \" : \"FAIL\", name);\n"
+        "    if (!cond) { g_fail++; }\n"
+        "}\n\n"
+    )
+
+    total = capacity * 4
+    if fw_id == "simulator":
+        total = 64 * 1024
+    elif fw_id in ("littlefs", "fatfs", "spiffs"):
+        total = 128 * 1024
+    elif fw_id == "fastflash":
+        total = 2 * 1024 * 1024
+    elif fw_id == "yaffs":
+        block = 32 * (2048 + 32)
+        total = 8 * block
+        erase_size = block
+    elif fw_id in ("baremetal",):
+        total = 64 * 1024
+    elif fw_id == "easyflash":
+        total = 32 * 1024
+
+    src = PRE + INC.get(fw_id, "\n") + EX + MAIN
+    src += BODY.get(fw_id, "#error 无 demo 模板\n")
+    src += FOOT
+    src = (src.replace("__TITLE__", title)
+              .replace("__CAP__", str(capacity))
+              .replace("__ERASE__", str(erase_size))
+              .replace("__TOTAL__", str(total)))
+    return src
 
 
-# ---------------------------------------------------------------------------
-# 主入口
-# ---------------------------------------------------------------------------
+
 def generate_zip(fw_id, params):
     """生成库文件 zip 包，返回 (zip_bytes, manifest_dict)。
 
@@ -1481,11 +1745,9 @@ def generate_zip(fw_id, params):
     top = "%s_library" % lib
 
     files = _collect_files(recipe, kind)
-    # 包内所有 .c（含 HAL 参考实现 flash_sim.c，供 PC demo 编译；不含 test_main.c）
+    # 包内所有 .c（含内存 HAL 参考实现 core/flash_hal_mem.c，供 PC demo 编译）
     all_c = ["%s/%s" % (d, r) for d, r, _ in files if r.endswith(".c")]
-    # lib_sources：导入到平台闭环编译用。HAL 参考实现 flash_sim.c 由平台自带，
-    # 从 lib_sources 剔除，避免重复定义。
-    lib_sources = [p for p in all_c if p != "core/flash_sim.c"]
+    lib_sources = list(all_c)  # 导入闭环编译用（框架 + 内存 HAL，自包含）
     sources = ["%s/%s" % (d, r) for d, r, _ in files if r.endswith((".c", ".h"))]
 
     cflags = _map_cflags(recipe, kind)
@@ -1494,7 +1756,7 @@ def generate_zip(fw_id, params):
         "name": "%s（导出库）" % recipe["title"],
         "desc": recipe["desc"],
         "base": fw_id,
-        "requires": recipe.get("requires", "flash_sim"),
+        "requires": "flash_hal",
         "cflags": cflags,
         "includes": list(PACKAGE_DIRS),
         "params": params,
@@ -1504,17 +1766,10 @@ def generate_zip(fw_id, params):
         "sources": sources + ["demo/test_main.c"],
     }
 
-    # 测试入口：基础框架（kv/simulator）自动生成，其余保留框架自带 main
-    test_entry = recipe.get("test_entry")
-    if test_entry:
-        full = os.path.join(ROOT, test_entry)
-        if not os.path.exists(full):
-            raise RuntimeError("测试入口缺失: %s" % full)
-        test_main = open(full, "rb").read()
-    else:
-        test_main = _render_test_main(fw_id, recipe, params).encode("utf-8")
+    # 测试入口：统一生成"内存 HAL 驱动"的自检 demo（平台无关，自包含）
+    test_main = _render_test_main(fw_id, recipe, params).encode("utf-8")
 
-    # demo 构建命令（PC 冒烟）：flash_sim.c 参考实现 + 框架源码 + test_main
+    # demo 构建命令（PC 冒烟）：内存 HAL + 框架源码 + test_main
     # （test_main 由 _build_cmd_line 单独追加，build_sources 只放框架源码）
     build_sources = all_c
     pkg = {

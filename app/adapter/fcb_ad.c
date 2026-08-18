@@ -20,6 +20,7 @@
 
 #include "app_register.h"
 #include "app_util.h"
+#include "flash_hal_adapter.h"
 #include "zephyr_compat.h"
 
 #define FCB_AD_BIN "app_fcb.bin"
@@ -28,6 +29,7 @@
 #define FCB_AD_SECTORS 16
 
 static flash_dev_t *s_dev = NULL;
+static flash_hal_t s_hal;
 static struct fcb s_fcb;
 static struct flash_sector s_sectors[FCB_AD_SECTORS];
 static int s_inited = 0;
@@ -143,8 +145,9 @@ static int fcb_ad_init_impl(const app_option_t *opt)
         flash_sim_erase(s_dev, 0, nsectors * cfg.erase_size);
     }
 
+    flash_hal_from_sim(s_dev, cfg.total_size, cfg.erase_size, cfg.write_size, &s_hal);
     const struct device *zdev =
-        zephyr_compat_register_flash(s_dev, cfg.erase_size, 1, 0xFF);
+        zephyr_compat_register_flash(&s_hal, cfg.erase_size, 1, 0xFF);
     zephyr_compat_register_area(0, zdev, 0, (off_t)nsectors * cfg.erase_size);
 
     memset(&s_fcb, 0, sizeof(s_fcb));

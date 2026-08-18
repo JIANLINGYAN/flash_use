@@ -1,37 +1,27 @@
 /**
- * fatfs_sim_port.h - FatFs 模拟基座移植层头文件
+ * fatfs_sim_port.h - FatFs 移植层头文件（注册式，平台无关）
  *
- * 声明对接本平台模拟基座（simulator/flash_sim.c）的移植接口，供
- * FatFs 组件与测试程序引用。与 easyflash/ef_port.h、flashdb 的 fal
- * 头文件同一定位。
+ * 声明把 FatFs 桥接到统一 flash_hal_t 的注册接口：目标平台实现
+ * flash_hal_t 后调用 fatfs_port_init 注册，即可挂载使用。与
+ * easyflash/ef_port.h、flashdb/fal_flash_sim_port.h 同一定位。
  */
 #ifndef FATFS_SIM_PORT_H
 #define FATFS_SIM_PORT_H
 
 #include <stdint.h>
+#include "flash_hal.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /**
- * 按环境变量配置并打开模拟基座设备。
- * 环境变量：SIM_TYPE/SIM_TOTAL/SIM_ERASE/SIM_CYCLES/SIM_RD_US/
- *           SIM_WR_US/SIM_ERASE_US/SIM_BAD_N/SIM_BAD_R。
- * @param bin_path 介质 BIN 文件路径
- * @return         0 成功，非 0 失败
+ * 注册 HAL 并配置 FatFs 磁盘底层。
+ * @param hal       统一 flash_hal_t（实现 read/write/erase）
+ * @param disk_base 磁盘在介质上的起始偏移（建议块对齐，默认 0）
+ * @return          0 成功，非 0 失败
  */
-int fatfs_sim_init_device(const char *bin_path);
-
-/**
- * 关闭模拟基座设备。
- */
-void fatfs_sim_deinit_device(void);
-
-/**
- * 返回当前模拟设备句柄（供统计/磨损图查询使用）。
- */
-struct flash_dev *fatfs_sim_device(void);
+int fatfs_port_init(const flash_hal_t *hal, uint32_t disk_base);
 
 /**
  * 返回介质扇区大小（FatFs 以扇区为基本读写单位）。

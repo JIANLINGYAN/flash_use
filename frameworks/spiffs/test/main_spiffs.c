@@ -23,6 +23,7 @@
  */
 
 #include "spiffs_sim_port.h"
+#include "flash_hal_adapter.h"
 #include "flash_sim.h"
 
 #include "spiffs.h"
@@ -267,8 +268,24 @@ int main(void)
     uint32_t total = (uint32_t)env_long("SIM_TOTAL", 128 * 1024);
     remove(SPIFFS_BIN);   /* 保证每次从全新介质开始（可重复运行） */
 
-    if (spiffs_sim_init_device(SPIFFS_BIN) != 0) {
+    /* 打开介质 -> 包装为统一 flash_hal_t -> 注册给移植层 */
+    flash_config_t fc;
+    memset(&fc, 0, sizeof(fc));
+    fc.type = (flash_type_t)env_long("SIM_TYPE", FLASH_TYPE_NOR);
+    fc.total_size = total;
+    fc.erase_size = (uint32_t)env_long("SIM_ERASE", 4096);
+    fc.write_size = (uint32_t)env_long("SIM_WRITE", 1);
+    fc.erase_cycles = (uint32_t)env_long("SIM_CYCLES", 100000);
+    fc.bin_path = SPIFFS_BIN;
+    flash_dev_t *dev = flash_sim_init(&fc);
+    if (!dev) {
         printf("  [FAIL] 模拟基座初始化失败!\n");
+        return 1;
+    }
+    flash_hal_t hal;
+    flash_hal_from_sim(dev, fc.total_size, fc.erase_size, fc.write_size, &hal);
+    if (spiffs_port_init(&hal) != 0) {
+        printf("  [FAIL] SPIFFS 移植层注册失败!\n");
         return 1;
     }
     printf("  [OK  ] 模拟基座初始化成功 (total=%u)\n", total);
@@ -288,7 +305,7 @@ int main(void)
     /* 输出结构化统计（后端解析） */
     {
         flash_stats_t st;
-        flash_sim_get_stats(spiffs_sim_device(), &st);
+        flash_sim_get_stats(dev, &st);
         printf("STATS_JSON:{\"reads\":%u,\"writes\":%u,\"erases\":%u,"
                "\"write_bytes\":%u,\"max_cycles\":%u,\"avg_cycles\":%u,"
                "\"read_us\":%llu,\"write_us\":%llu,\"erase_us\":%llu,"
@@ -299,11 +316,11 @@ int main(void)
                (unsigned long long)st.write_time_us,
                (unsigned long long)st.erase_time_us,
                st.bad_block_count, 100000u);
-        uint32_t nblk = flash_sim_block_count(spiffs_sim_device());
+        uint32_t nblk = flash_sim_block_count(dev);
         if (nblk > 0) {
             uint32_t *wm = (uint32_t *)malloc(sizeof(uint32_t) * nblk);
             if (wm) {
-                uint32_t got = flash_sim_get_wear_map(spiffs_sim_device(), wm, nblk);
+                uint32_t got = flash_sim_get_wear_map(dev, wm, nblk);
                 printf("WEARMAP:");
                 for (uint32_t i = 0; i < got; i++) {
                     printf("%s%u", i ? "," : "", wm[i]);
@@ -314,7 +331,7 @@ int main(void)
         }
     }
 
-    spiffs_sim_deinit_device();
+    flash_sim_deinit(dev);
     printf("\n=== SPIFFS 运行验证结果: %s ===\n",
            g_fail == 0 ? "全部通过" : "存在失败");
     return g_fail == 0 ? 0 : 1;

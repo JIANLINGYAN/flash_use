@@ -35,7 +35,7 @@
 #include "nvdm_port.h"
 #include "nvdm_internal.h"
 
-#include "flash_sim.h"
+#include "flash_hal.h"
 #include "nvdm_sim_port.h"
 
 /* NVDM 全局控制块（定义于 vendor/src/nvdm_main.c） */
@@ -240,7 +240,7 @@ void nvdm_log_msgid_error(const char *message, uint32_t arg_cnt, ...)
 
 /* ==================== 分区配置 ==================== */
 
-static flash_dev_t *s_dev = NULL;
+static const flash_hal_t *s_hal = NULL;
 static uint32_t s_base_addr = 0;
 static uint32_t s_peb_size = 4096;
 static uint32_t s_peb_count = 0;
@@ -248,10 +248,10 @@ static uint32_t s_item_count = 100;
 
 static nvdm_partition_cfg_t s_partition_cfg[1];
 
-void nvdm_sim_setup(flash_dev_t *dev, uint32_t base_addr, uint32_t capacity,
+void nvdm_sim_setup(const flash_hal_t *hal, uint32_t base_addr, uint32_t capacity,
                     uint32_t peb_size, uint32_t item_count)
 {
-    s_dev = dev;
+    s_hal = hal;
     s_base_addr = base_addr;
     s_peb_size = peb_size;
     s_peb_count = capacity / peb_size;
@@ -263,15 +263,15 @@ void nvdm_sim_reset(void)
     memset(&g_ncb, 0, sizeof(g_ncb));
 }
 
-flash_dev_t *nvdm_sim_device(void)
+void *nvdm_sim_device(void)
 {
-    return s_dev;
+    return NULL;   /* 已改为注册式 HAL，介质句柄由测试程序持有 */
 }
 
 nvdm_partition_cfg_t *nvdm_port_load_partition_info(uint32_t *partition_num)
 {
     *partition_num = 0;
-    if (s_dev == NULL) {
+    if (s_hal == NULL) {
         return s_partition_cfg;
     }
     if (s_peb_count < 2u) {
@@ -308,11 +308,11 @@ bool nvdm_port_get_max_item_cfg(nvdm_partition_cfg_t *p_cfg)
 
 void nvdm_port_flash_read(uint32_t address, uint8_t *buffer, uint32_t length)
 {
-    if (s_dev == NULL || buffer == NULL) {
+    if (s_hal == NULL || buffer == NULL) {
         nvdm_port_must_assert();
         return;
     }
-    if (flash_sim_read(s_dev, address, buffer, length) != FLASH_OK) {
+    if (s_hal->read(s_hal->ctx, address, buffer, length) != 0) {
         nvdm_log_error("flash read fail: addr=0x%x len=%u", address, length);
         nvdm_port_must_assert();
     }
@@ -320,11 +320,11 @@ void nvdm_port_flash_read(uint32_t address, uint8_t *buffer, uint32_t length)
 
 void nvdm_port_flash_write(uint32_t address, const uint8_t *buffer, uint32_t length)
 {
-    if (s_dev == NULL || buffer == NULL) {
+    if (s_hal == NULL || buffer == NULL) {
         nvdm_port_must_assert();
         return;
     }
-    if (flash_sim_write(s_dev, address, buffer, length) != FLASH_OK) {
+    if (s_hal->write(s_hal->ctx, address, buffer, length) != 0) {
         nvdm_log_error("flash write fail: addr=0x%x len=%u", address, length);
         nvdm_port_must_assert();
     }
@@ -332,11 +332,11 @@ void nvdm_port_flash_write(uint32_t address, const uint8_t *buffer, uint32_t len
 
 void nvdm_port_flash_erase(uint32_t address)
 {
-    if (s_dev == NULL) {
+    if (s_hal == NULL) {
         nvdm_port_must_assert();
         return;
     }
-    if (flash_sim_erase(s_dev, address, s_peb_size) != FLASH_OK) {
+    if (s_hal->erase(s_hal->ctx, address, s_peb_size) != 0) {
         nvdm_log_error("flash erase fail: addr=0x%x size=%u", address, s_peb_size);
         nvdm_port_must_assert();
     }

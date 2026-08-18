@@ -14,10 +14,12 @@
 
 #include "app_register.h"
 #include "app_util.h"
+#include "flash_hal_adapter.h"
 
 #define SPIFFS_AD_BIN "app_spiffs.bin"
 
 static flash_dev_t *s_dev = NULL;
+static flash_hal_t s_hal;
 static int s_mounted = 0;
 
 static int spiffs_init_impl(const app_option_t *opt)
@@ -27,28 +29,41 @@ static int spiffs_init_impl(const app_option_t *opt)
     if (!reinit) {
         remove(SPIFFS_AD_BIN);
     }
-    if (spiffs_sim_init_device(SPIFFS_AD_BIN) != 0) {
+    /* 打开介质 -> 包装为统一 flash_hal_t -> 注册给移植层 */
+    flash_config_t fc;
+    memset(&fc, 0, sizeof(fc));
+    fc.type = FLASH_TYPE_NOR;
+    fc.total_size = 128 * 1024;
+    fc.erase_size = 4096;
+    fc.write_size = 1;
+    fc.erase_cycles = 100000;
+    fc.bin_path = SPIFFS_AD_BIN;
+    s_dev = flash_sim_init(&fc);
+    if (!s_dev) {
         return -1;
     }
-    s_dev = spiffs_sim_device();
+    flash_hal_from_sim(s_dev, fc.total_size, fc.erase_size, fc.write_size, &s_hal);
+    if (spiffs_port_init(&s_hal) != 0) {
+        return -1;
+    }
 
     s32_t rc = spiffs_sim_mount();
     if (rc != SPIFFS_OK) {
         /* 掉电恢复时禁止格式化（介质损坏应报错而非重建） */
         if (reinit) {
-            spiffs_sim_deinit_device();
+            flash_sim_deinit(s_dev);
             s_dev = NULL;
             return -1;
         }
         rc = spiffs_sim_format();
         if (rc != SPIFFS_OK) {
-            spiffs_sim_deinit_device();
+            flash_sim_deinit(s_dev);
             s_dev = NULL;
             return -1;
         }
         rc = spiffs_sim_mount();
         if (rc != SPIFFS_OK) {
-            spiffs_sim_deinit_device();
+            flash_sim_deinit(s_dev);
             s_dev = NULL;
             return -1;
         }
@@ -64,7 +79,7 @@ static void spiffs_deinit_impl(void)
         s_mounted = 0;
     }
     if (s_dev) {
-        spiffs_sim_deinit_device();
+        flash_sim_deinit(s_dev);
         s_dev = NULL;
     }
 }

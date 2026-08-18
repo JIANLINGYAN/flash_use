@@ -15,11 +15,13 @@
 
 #include "app_register.h"
 #include "app_util.h"
+#include "flash_hal_adapter.h"
 
 #define YAFFS_AD_BIN "app_yaffs.bin"
 #define YAFFS_AD_ROOT "/flash"
 
 static flash_dev_t *s_dev = NULL;
+static flash_hal_t s_hal;
 static int s_mounted = 0;
 
 static int yaffs_init_impl(const app_option_t *opt)
@@ -29,17 +31,32 @@ static int yaffs_init_impl(const app_option_t *opt)
     if (!app_env_u32("APP_REINIT", 0)) {
         remove(YAFFS_AD_BIN);
     }
-    if (yaffs_sim_init_device(YAFFS_AD_BIN) != 0) {
+    /* 打开介质 -> 包装为统一 flash_hal_t -> 注册给移植层 */
+    flash_config_t fc;
+    memset(&fc, 0, sizeof(fc));
+    fc.type = FLASH_TYPE_NOR;
+    fc.total_size = YAFFS_SIM_BLOCKS * YAFFS_SIM_CHUNKS_PER_BLOCK
+                    * (YAFFS_SIM_CHUNK_BYTES + YAFFS_SIM_SPARE_BYTES);
+    fc.erase_size = YAFFS_SIM_CHUNKS_PER_BLOCK
+                    * (YAFFS_SIM_CHUNK_BYTES + YAFFS_SIM_SPARE_BYTES);
+    fc.write_size = 1;
+    fc.erase_cycles = 100000;
+    fc.bin_path = YAFFS_AD_BIN;
+    s_dev = flash_sim_init(&fc);
+    if (!s_dev) {
         return -1;
     }
-    s_dev = yaffs_sim_device();
+    flash_hal_from_sim(s_dev, fc.total_size, fc.erase_size, fc.write_size, &s_hal);
+    if (yaffs_port_init(&s_hal) != 0) {
+        return -1;
+    }
     if (yaffs_sim_start_up() != 0) {
-        yaffs_sim_deinit_device();
+        flash_sim_deinit(s_dev);
         s_dev = NULL;
         return -1;
     }
     if (yaffs_mount(YAFFS_AD_ROOT) < 0) {
-        yaffs_sim_deinit_device();
+        flash_sim_deinit(s_dev);
         s_dev = NULL;
         return -1;
     }
@@ -54,7 +71,7 @@ static void yaffs_deinit_impl(void)
         s_mounted = 0;
     }
     if (s_dev) {
-        yaffs_sim_deinit_device();
+        flash_sim_deinit(s_dev);
         s_dev = NULL;
     }
 }

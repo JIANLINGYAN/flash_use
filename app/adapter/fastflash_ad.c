@@ -26,9 +26,13 @@
 
 #include "app_register.h"
 #include "app_util.h"
+#include "flash_hal_adapter.h"
 
 #define FLT_AD_BIN "app_fastflash.bin"
 #define FLT_TABLE "kv"
+
+static flash_dev_t *s_dev = NULL;
+static flash_hal_t s_hal;
 #define FLT_MAX_STRUCTS 64u
 
 static uint32_t s_total = 0;
@@ -55,12 +59,11 @@ static int flt_index_written(uint32_t index)
         return 0;
     }
     /* 通过读表头获取 struct_nums */
-    flash_dev_t *dev = fast_flash_sim_device();
-    if (!dev) {
+    if (!s_dev) {
         return 0;
     }
     uint8_t hdr[sizeof(table_header_t)];
-    if (flash_sim_read(dev, info.addr, hdr, sizeof(hdr)) != FLASH_OK) {
+    if (flash_sim_read(s_dev, info.addr, hdr, sizeof(hdr)) != FLASH_OK) {
         return 0;
     }
     table_header_t header;
@@ -74,19 +77,31 @@ static int flt_init_impl(const app_option_t *opt)
     /* fast_flashdb_table 为日志式设计：每次覆盖写迁移整表并重写 manager
      * 表，写放大显著。默认给足 2MB 容量避免 durability/update 任务空间
      * 耗尽（用户可通过 SIM_TOTAL 显式调整）。 */
-    if (!getenv("SIM_TOTAL")) {
-        setenv("SIM_TOTAL", "2097152", 1);
-    }
     s_total = app_env_u32("SIM_TOTAL", 2 * 1024 * 1024);
     /* 掉电恢复（APP_REINIT=1）：保留介质内容，直接重新初始化 */
     if (!app_env_u32("APP_REINIT", 0)) {
         remove(FLT_AD_BIN);
     }
-    if (fast_flash_sim_init_device(FLT_AD_BIN) != 0) {
+    /* 打开介质 -> 包装为统一 flash_hal_t -> 注册给移植层 */
+    flash_config_t fc;
+    memset(&fc, 0, sizeof(fc));
+    fc.type = FLASH_TYPE_NOR;
+    fc.total_size = s_total;
+    fc.erase_size = 4096;
+    fc.write_size = 1;
+    fc.erase_cycles = 100000;
+    fc.bin_path = FLT_AD_BIN;
+    s_dev = flash_sim_init(&fc);
+    if (!s_dev) {
+        return -1;
+    }
+    flash_hal_from_sim(s_dev, fc.total_size, fc.erase_size, fc.write_size, &s_hal);
+    if (fast_flash_port_init(&s_hal) != 0) {
         return -1;
     }
     if (fast_flash_init(&sim_flash_ops, s_total, true) != 0) {
-        fast_flash_sim_deinit_device();
+        flash_sim_deinit(s_dev);
+        s_dev = NULL;
         return -1;
     }
     return 0;
@@ -94,12 +109,15 @@ static int flt_init_impl(const app_option_t *opt)
 
 static void flt_deinit_impl(void)
 {
-    fast_flash_sim_deinit_device();
+    if (s_dev) {
+        flash_sim_deinit(s_dev);
+        s_dev = NULL;
+    }
 }
 
 static flash_dev_t *flt_device_impl(void)
 {
-    return fast_flash_sim_device();
+    return s_dev;
 }
 
 static int flt_set_impl(const char *key, const void *val, uint16_t len)

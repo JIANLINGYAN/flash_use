@@ -15,11 +15,13 @@
 
 #include "app_register.h"
 #include "app_util.h"
+#include "flash_hal_adapter.h"
 #include "fal_flash_sim_port.h"
 
 #define FDB_AD_BIN "app_flashdb.bin"
 
 static flash_dev_t *s_dev = NULL;
+static flash_hal_t s_hal;
 static uint32_t s_capacity = 0;
 static struct fdb_kvdb s_kvdb;
 static int s_kvdb_inited = 0;
@@ -52,8 +54,9 @@ static int fdb_init_impl(const app_option_t *opt)
     if (!app_env_u32("APP_REINIT", 0)) {
         flash_sim_erase(s_dev, 0, s_capacity);
     }
+    flash_hal_from_sim(s_dev, cfg.total_size, cfg.erase_size, cfg.write_size, &s_hal);
 
-    if (fal_sim_port_init(s_dev, cfg.total_size, cfg.erase_size,
+    if (fal_sim_port_init(&s_hal, cfg.total_size, cfg.erase_size,
                           0, s_capacity, 0) != 0) {
         flash_sim_deinit(s_dev);
         s_dev = NULL;

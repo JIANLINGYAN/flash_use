@@ -1,34 +1,26 @@
 /**
- * spiffs_sim_port.c - SPIFFS 对接本平台模拟基座的移植层
+ * spiffs_sim_port.c - SPIFFS 移植层（注册式，平台无关）
  *
  * 本文件属于"框架适配层"（与 easyflash/ef_port.c、flashdb/fal_flash_sim_port.c
- * 同一定位），把 SPIFFS 的 HAL 回调（read/write/erase）对接到
- * simulator/flash_sim.c 实现的统一 Flash 抽象。
- *
- * 移植层本身不含业务逻辑，仅做"块设备接口 <-> 模拟基座"的参数与句柄桥接：
- *   hal_read_f  -> flash_sim_read
- *   hal_write_f -> flash_sim_write
- *   hal_erase_f -> flash_sim_erase
+ * 同一定位），把 SPIFFS 的 HAL 回调（read/write/erase）桥接到统一
+ * flash_hal_t（目标平台实现 read/write/erase 后注册）。
  *
  * SPIFFS 每次写/擦前由自身保证目标块已被擦除（其日志结构按"写前擦"设计），
- * 因此模拟基座的"写入仅允许 1->0"语义天然兼容。
+ * 因此底层"写入仅允许 1->0"语义天然兼容。
  */
 
 #include "spiffs_sim_port.h"
-#include "flash_sim.h"
 
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #include "spiffs.h"
 
-/* 默认介质几何：128KB、4KB 块、256B 页 */
+/* 默认介质几何（注册时若 hal 未配置则使用） */
 #define SPIFFS_TOTAL_DEFAULT  (128u * 1024)
 #define SPIFFS_BLOCK_DEFAULT  4096u
 
-/* 全局模拟设备句柄（由 spiffs_sim_init_device 建立） */
-static flash_dev_t *g_sim_dev = NULL;
+/* 注册的 HAL 实例（全局单实例） */
+static const flash_hal_t *s_hal = NULL;
 
 /* SPIFFS 运行时（全局单实例） */
 static spiffs g_fs;
@@ -38,52 +30,32 @@ static u8_t g_work[SPIFFS_LOG_PAGE_SIZE * 2];
 static u8_t g_fd_space[32 * 64];
 static u8_t g_cache[SPIFFS_LOG_PAGE_SIZE * 4];
 
-/* 介质几何缓存（flash_sim 句柄不透明无法直接读取） */
+/* 介质几何缓存（来自 hal） */
 static uint32_t s_total = SPIFFS_TOTAL_DEFAULT;
 static uint32_t s_block = SPIFFS_BLOCK_DEFAULT;
 
 /* ---- HAL 回调（SPIFFS 以字节地址寻址；返回非 0 即错误） ---- */
 static s32_t hal_read(u32_t addr, u32_t size, u8_t *dst)
 {
-    return (flash_sim_read(g_sim_dev, addr, dst, size) == FLASH_OK) ? 0 : -1;
+    return (s_hal && s_hal->read(s_hal->ctx, addr, dst, size) == 0) ? 0 : -1;
 }
 
 static s32_t hal_write(u32_t addr, u32_t size, u8_t *src)
 {
-    return (flash_sim_write(g_sim_dev, addr, src, size) == FLASH_OK) ? 0 : -1;
+    return (s_hal && s_hal->write(s_hal->ctx, addr, src, size) == 0) ? 0 : -1;
 }
 
 static s32_t hal_erase(u32_t addr, u32_t size)
 {
-    return (flash_sim_erase(g_sim_dev, addr, size) == FLASH_OK) ? 0 : -1;
+    return (s_hal && s_hal->erase(s_hal->ctx, addr, size) == 0) ? 0 : -1;
 }
 
-int spiffs_sim_init_device(const char *bin_path)
+int spiffs_port_init(const flash_hal_t *hal)
 {
-    flash_config_t fc;
-    memset(&fc, 0, sizeof(fc));
-    fc.bin_path = bin_path ? bin_path : "spiffs_sim.bin";
-    FLASH_CFG_DEFAULTS_BY_TYPE(fc, FLASH_TYPE_NOR);
-
-    const char *v;
-#define ENV_LONG(K, D) (((v) = getenv(K)) && *v ? (uint32_t)atol(v) : (D))
-    fc.type         = (flash_type_t)ENV_LONG("SIM_TYPE", FLASH_TYPE_NOR);
-    fc.total_size   = ENV_LONG("SIM_TOTAL", SPIFFS_TOTAL_DEFAULT);
-    fc.erase_size   = ENV_LONG("SIM_ERASE", SPIFFS_BLOCK_DEFAULT);
-    fc.write_size   = ENV_LONG("SIM_WRITE", 1);
-    fc.erase_cycles = ENV_LONG("SIM_CYCLES", 100000);
-    fc.read_us      = ENV_LONG("SIM_RD_US", 0);
-    fc.write_us     = ENV_LONG("SIM_WR_US", 0);
-    fc.erase_us     = ENV_LONG("SIM_ERASE_US", 0);
-    fc.bad_blocks   = ENV_LONG("SIM_BAD_N", 0);
-    fc.bad_ratio    = ENV_LONG("SIM_BAD_R", 0);
-#undef ENV_LONG
-
-    if (g_sim_dev) { flash_sim_deinit(g_sim_dev); g_sim_dev = NULL; }
-    g_sim_dev = flash_sim_init(&fc);
-    if (!g_sim_dev) { return -1; }
-    s_total = fc.total_size;
-    s_block = fc.erase_size;
+    if (!hal) { return -1; }
+    s_hal = hal;
+    if (hal->total_size) { s_total = hal->total_size; }
+    if (hal->erase_size) { s_block = hal->erase_size; }
     return 0;
 }
 
@@ -121,14 +93,4 @@ void spiffs_sim_unmount(void)
 void *spiffs_sim_fs(void)
 {
     return &g_fs;
-}
-
-void spiffs_sim_deinit_device(void)
-{
-    if (g_sim_dev) { flash_sim_deinit(g_sim_dev); g_sim_dev = NULL; }
-}
-
-struct flash_dev *spiffs_sim_device(void)
-{
-    return g_sim_dev;
 }

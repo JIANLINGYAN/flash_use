@@ -137,8 +137,11 @@ def main():
     args = [a for a in sys.argv[1:] if a != "--app"]
     run_app = "--app" in sys.argv
     ids = args or None
-    frameworks = [f for f in registry.FRAMEWORKS
+    # 使用 get_framework 注入统一 HAL 契约依赖（include + 适配器源），
+    # 与 backend/server.py 的编译口径保持一致。
+    frameworks = [registry.get_framework(f["id"]) for f in registry.FRAMEWORKS
                   if ids is None or f["id"] in ids]
+    frameworks = [f for f in frameworks if f]
 
     # 模拟基座额外覆盖 NAND/EEPROM（受限测试项 + 小容量，避免全片写满）
     extra_runs = {

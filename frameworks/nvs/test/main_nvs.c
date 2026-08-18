@@ -21,6 +21,7 @@
 
 #include <zephyr/kvss/nvs.h>
 
+#include "flash_hal_adapter.h"
 #include "flash_sim.h"
 #include "zephyr_compat.h"
 
@@ -290,9 +291,13 @@ int main(void)
 
     flash_sim_erase(s_dev, 0, capacity);
 
+    /* 打开介质 -> 包装为统一 flash_hal_t -> 注册给兼容层 */
+    flash_hal_t hal;
+    flash_hal_from_sim(s_dev, cfg.total_size, cfg.erase_size, cfg.write_size, &hal);
+
     /* 注册 Zephyr flash 设备并挂载 NVS */
     const struct device *zdev =
-        zephyr_compat_register_flash(s_dev, cfg.erase_size, 1, 0xFF);
+        zephyr_compat_register_flash(&hal, cfg.erase_size, 1, 0xFF);
     memset(&s_fs, 0, sizeof(s_fs));
     s_fs.offset = 0;
     s_fs.sector_size = cfg.erase_size;

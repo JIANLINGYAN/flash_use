@@ -22,6 +22,7 @@
 
 #include <zephyr/fs/fcb.h>
 
+#include "flash_hal_adapter.h"
 #include "flash_sim.h"
 #include "zephyr_compat.h"
 
@@ -323,9 +324,13 @@ int main(void)
 
     flash_sim_erase(s_dev, 0, capacity);
 
+    /* 打开介质 -> 包装为统一 flash_hal_t -> 注册给兼容层 */
+    flash_hal_t hal;
+    flash_hal_from_sim(s_dev, cfg.total_size, cfg.erase_size, cfg.write_size, &hal);
+
     /* 注册 Zephyr 设备与分区（id=0），填充 FCB 扇区表 */
     const struct device *zdev =
-        zephyr_compat_register_flash(s_dev, cfg.erase_size, 1, 0xFF);
+        zephyr_compat_register_flash(&hal, cfg.erase_size, 1, 0xFF);
     zephyr_compat_register_area(0, zdev, 0, capacity);
 
     memset(&s_fcb, 0, sizeof(s_fcb));

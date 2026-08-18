@@ -46,7 +46,7 @@ typedef struct {
 } fs_fat_t;
 
 /* ---------- 运行期上下文 ---------- */
-static flash_dev_t *s_dev = NULL;
+static const flash_hal_t *s_hal = NULL;
 static uint32_t s_base = 0;
 static uint32_t s_size = 0;
 static uint32_t s_block = 0;        /* 块大小 = 擦除块 */
@@ -62,17 +62,17 @@ static uint32_t data_blk_off(uint32_t n)
 /* ---------- 底层读写擦 ---------- */
 static int erase_blk(uint32_t off)
 {
-    return flash_sim_erase(s_dev, off, s_block) == FLASH_OK ? 0 : -1;
+    return (s_hal->erase(s_hal->ctx, off, s_block) == 0) ? 0 : -1;
 }
 
 static int write_blk(uint32_t off, const void *buf, uint32_t len)
 {
-    return (flash_sim_write(s_dev, off, buf, len) == FLASH_OK) ? 0 : -1;
+    return (s_hal->write(s_hal->ctx, off, buf, len) == 0) ? 0 : -1;
 }
 
 static int read_blk(uint32_t off, void *buf, uint32_t len)
 {
-    return (flash_sim_read(s_dev, off, buf, len) == FLASH_OK) ? 0 : -1;
+    return (s_hal->read(s_hal->ctx, off, buf, len) == 0) ? 0 : -1;
 }
 
 /* ---------- FAT 落盘 ---------- */
@@ -173,11 +173,11 @@ static fs_err_t store_to_blocks(const void *buf, uint32_t len,
 
 /* ==================== 公共 API ==================== */
 
-fs_err_t fs_init(flash_dev_t *dev, uint32_t base, uint32_t size,
+fs_err_t fs_init(const flash_hal_t *hal, uint32_t base, uint32_t size,
                  uint32_t block_size)
 {
-    if (!dev || size < 2u) { return FS_ERR_ARGS; }
-    s_dev = dev;
+    if (!hal || size < 2u) { return FS_ERR_ARGS; }
+    s_hal = hal;
     s_base = base;
     s_size = size;
     s_block = block_size;
@@ -190,15 +190,15 @@ fs_err_t fs_init(flash_dev_t *dev, uint32_t base, uint32_t size,
     return fat_load();   /* 全新介质返回 FS_ERR_CORRUPT */
 }
 
-fs_err_t fs_format(flash_dev_t *dev, uint32_t base, uint32_t size,
+fs_err_t fs_format(const flash_hal_t *hal, uint32_t base, uint32_t size,
                    uint32_t block_size)
 {
-    if (fs_init(dev, base, size, block_size) != FS_OK) {
+    if (fs_init(hal, base, size, block_size) != FS_OK) {
         /* 允许 CORRUPT 后重建 */
         if (s_data_blocks == 0) { return FS_ERR_ARGS; }
     }
     for (uint32_t off = base; off < base + size; off += s_block) {
-        if (flash_sim_erase(dev, off, s_block) != FLASH_OK) {
+        if (s_hal->erase(s_hal->ctx, off, s_block) != 0) {
             return FS_ERR_IO;
         }
     }
@@ -211,9 +211,9 @@ fs_err_t fs_format(flash_dev_t *dev, uint32_t base, uint32_t size,
     return fat_commit();
 }
 
-fs_err_t fs_create(flash_dev_t *dev, const char *name)
+fs_err_t fs_create(const flash_hal_t *hal, const char *name)
 {
-    if (!dev || !name || !*name || strlen(name) >= FS_NAME_MAX) {
+    if (!hal || !name || !*name || strlen(name) >= FS_NAME_MAX) {
         return FS_ERR_ARGS;
     }
     if (entry_find(name)) { return FS_ERR_EXIST; }
@@ -226,9 +226,9 @@ fs_err_t fs_create(flash_dev_t *dev, const char *name)
     return fat_commit();
 }
 
-fs_err_t fs_delete(flash_dev_t *dev, const char *name)
+fs_err_t fs_delete(const flash_hal_t *hal, const char *name)
 {
-    if (!dev || !name) { return FS_ERR_ARGS; }
+    if (!hal || !name) { return FS_ERR_ARGS; }
     fs_entry_t *e = entry_find(name);
     if (!e) { return FS_ERR_NOTFOUND; }
     memset(e, 0, sizeof(*e));
@@ -236,15 +236,15 @@ fs_err_t fs_delete(flash_dev_t *dev, const char *name)
     return fat_commit();
 }
 
-fs_err_t fs_write(flash_dev_t *dev, const char *name,
+fs_err_t fs_write(const flash_hal_t *hal, const char *name,
                   const void *buf, uint32_t len)
 {
-    if (!dev || !name || !*name || strlen(name) >= FS_NAME_MAX) {
+    if (!hal || !name || !*name || strlen(name) >= FS_NAME_MAX) {
         return FS_ERR_ARGS;
     }
     fs_entry_t *e = entry_find(name);
     if (!e) {
-        fs_err_t rc = fs_create(dev, name);
+        fs_err_t rc = fs_create(hal, name);
         if (rc != FS_OK) { return rc; }
         e = entry_find(name);
     }
@@ -278,10 +278,10 @@ fs_err_t fs_write(flash_dev_t *dev, const char *name,
     return fat_commit();
 }
 
-fs_err_t fs_append(flash_dev_t *dev, const char *name,
+fs_err_t fs_append(const flash_hal_t *hal, const char *name,
                    const void *buf, uint32_t len)
 {
-    if (!dev || !name || !*name) { return FS_ERR_ARGS; }
+    if (!hal || !name || !*name) { return FS_ERR_ARGS; }
     fs_entry_t *e = entry_find(name);
     if (!e) { return FS_ERR_NOTFOUND; }
 
@@ -289,7 +289,7 @@ fs_err_t fs_append(flash_dev_t *dev, const char *name,
     uint32_t in_blk = e->size % s_block;
     if (e->blocks > 0 && e->size > 0 && in_blk + len <= s_block) {
         uint32_t off = data_blk_off(e->start_blk + e->blocks - 1u) + in_blk;
-        if (flash_sim_write(s_dev, off, buf, len) == FLASH_OK) {
+        if (s_hal->write(s_hal->ctx, off, buf, len) == 0) {
             e->size += len;
             return fat_commit();
         }
@@ -301,21 +301,21 @@ fs_err_t fs_append(flash_dev_t *dev, const char *name,
     fs_err_t rc = FS_OK;
     if (old) {
         uint32_t rd = old;
-        rc = fs_read(dev, name, tmp, 0, &rd);
+        rc = fs_read(hal, name, tmp, 0, &rd);
         if (rc != FS_OK || rd != old) { rc = FS_ERR_IO; }
     }
     if (rc == FS_OK) {
         memcpy(tmp + old, buf, len);
-        rc = fs_write(dev, name, tmp, old + len);
+        rc = fs_write(hal, name, tmp, old + len);
     }
     free(tmp);
     return rc;
 }
 
-fs_err_t fs_read(flash_dev_t *dev, const char *name,
+fs_err_t fs_read(const flash_hal_t *hal, const char *name,
                  void *buf, uint32_t offset, uint32_t *len)
 {
-    if (!dev || !name || !buf || !len) { return FS_ERR_ARGS; }
+    if (!hal || !name || !buf || !len) { return FS_ERR_ARGS; }
     fs_entry_t *e = entry_find(name);
     if (!e) { return FS_ERR_NOTFOUND; }
     if (offset >= e->size) {
@@ -338,24 +338,24 @@ fs_err_t fs_read(flash_dev_t *dev, const char *name,
     return FS_OK;
 }
 
-fs_err_t fs_get_size(flash_dev_t *dev, const char *name, uint32_t *size)
+fs_err_t fs_get_size(const flash_hal_t *hal, const char *name, uint32_t *size)
 {
-    if (!dev || !name || !size) { return FS_ERR_ARGS; }
+    if (!hal || !name || !size) { return FS_ERR_ARGS; }
     fs_entry_t *e = entry_find(name);
     if (!e) { return FS_ERR_NOTFOUND; }
     *size = e->size;
     return FS_OK;
 }
 
-bool fs_exists(flash_dev_t *dev, const char *name)
+bool fs_exists(const flash_hal_t *hal, const char *name)
 {
-    if (!dev || !name) { return false; }
+    if (!hal || !name) { return false; }
     return entry_find(name) != NULL;
 }
 
-uint32_t fs_file_count(flash_dev_t *dev)
+uint32_t fs_file_count(const flash_hal_t *hal)
 {
-    (void)dev;
+    (void)hal;
     uint32_t n = 0;
     for (uint32_t i = 0; i < FS_MAX_FILES; i++) {
         if (s_fat.entries[i].state == FS_ENTRY_USED) { n++; }
@@ -363,8 +363,8 @@ uint32_t fs_file_count(flash_dev_t *dev)
     return n;
 }
 
-uint32_t fs_block_size(flash_dev_t *dev)
+uint32_t fs_block_size(const flash_hal_t *hal)
 {
-    (void)dev;
+    (void)hal;
     return s_block;
 }

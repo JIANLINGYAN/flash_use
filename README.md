@@ -4,12 +4,20 @@
 
 1. **驱动层（模拟基座）**：`simulator/flash_sim` —— NOR/NAND/EEPROM 物理
    特性仿真，独立性能检测（读写擦次数/耗时/磨损统计）与参数配置。
-2. **组件层**：`frameworks/*` —— 各类适配了模拟基座的存储组件，分为
-   **裸机简单框架 / KV 管理 / 文件系统** 三类。组件本体（尤其开源组件
-   vendor）零修改，只新增移植层（sim_port）。
+2. **组件层**：`frameworks/*` —— 各类存储组件，分为**裸机简单框架 / KV
+   管理 / 文件系统** 三类。组件本体（尤其开源组件 vendor）零修改。
 3. **应用层测试框架**：`app/*` —— 统一任务引擎，通过**适配层**
    （`app/adapter/*`）调用组件层，对不同任务执行对应测试选项，并独立
    做**性能计算**（吞吐 / 写放大 / 介质阻塞 / 磨损分布 / 掉电安全）。
+
+**统一 HAL 契约（平台无关）**：`frameworks/common/flash_hal.h` 定义最小
+Flash 操作抽象 `flash_hal_t`（注册式：实现 `read/write/erase` 三个回调 +
+几何参数即可）。所有组件只依赖该契约，**不绑定任何平台/驱动/OS**：
+- 平台内仿真：`simulator/flash_hal_adapter.c` 把模拟基座 `flash_sim`
+  桥接为 `flash_hal_t` 注册给框架；
+- 目标 MCU：按契约实现真实驱动的 `flash_hal_t` 即可，框架零改动；
+- 导出包 demo：`simulator/flash_hal_mem.c` 提供零依赖内存介质参考实现，
+  可在 PC 直接编译运行。
 
 并提供 **前端模拟运行界面** 进行可视化验证（左侧框架按分类分组展示，
 含独立"应用层测试"标签页做跨组件横向对比）。
@@ -19,7 +27,9 @@
 ```
 flash_use/
 ├── simulator/            # 模块一：模拟基座（C 库）
-│   ├── flash_sim.h/.c    #   统一 Flash 接口 read/write/erase，BIN 落盘
+│   ├── flash_sim.h/.c    #   Flash 物理特性仿真，BIN 落盘
+│   ├── flash_hal_adapter.h/.c  # 模拟基座 -> 统一 flash_hal_t 桥接
+│   ├── flash_hal_mem.h/.c      # 零依赖内存介质 HAL 参考实现（demo/导入用）
 │   └── test/main_sim.c   #   自检：NOR/NAND/EEPROM 物理特性
 ├── app/                  # 应用层测试框架（统一任务引擎 + 适配层）
 │   ├── app_common.h      #   测试选项/任务/结果统计/组件适配器接口定义
@@ -30,7 +40,8 @@ flash_use/
 │   │                     #   nvdm/nvs/zms/fcb/tym_setting/baremetal/fs_store/
 │   │                     #   littlefs/fatfs/spiffs/yaffs）
 │   └── test/main_app.c   #   统一入口（APP_COMPONENT + APP_TASK 选择）
-├── frameworks/           # 组件层：存储框架库（对接 simulator，可移植 C）
+├── frameworks/           # 组件层：存储框架库（仅依赖 common/flash_hal.h）
+│   ├── common/flash_hal.h #  ★ 统一 HAL 契约（注册式 read/write/erase）
 │   ├── kv/               #   自研 KV/NVS 框架
 │   │   ├── kv_store.h/.c #     两步提交掉电安全 + CRC + 压实 GC
 │   │   └── test/main_kv.c#     运行验证
@@ -178,8 +189,8 @@ python3 scripts/check_app_build.py
 
 ```bash
 gcc -std=c99 -Wall -Wextra -D_POSIX_C_SOURCE=199309L \
-    -Iapp -Isimulator -Iframeworks/kv \
-    -o /tmp/app_kv simulator/flash_sim.c app/app_register.c app/app_util.c \
+    -Iapp -Isimulator -Iframeworks/common -Iframeworks/kv \
+    -o /tmp/app_kv simulator/flash_sim.c simulator/flash_hal_adapter.c app/app_register.c app/app_util.c \
     app/app_task.c app/test/main_app.c app/adapter/kv_store_ad.c \
     frameworks/kv/kv_store.c
 
@@ -207,24 +218,24 @@ APP_COMPONENT=kv APP_TASK=durability APP_ITEMS=10 APP_VLEN=32 /tmp/app_kv
 
 ```bash
 # 模拟基座自检
-gcc -std=c99 -Wall -Wextra -Isimulator \
+gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/common \
     -o /tmp/sim simulator/flash_sim.c simulator/test/main_sim.c && /tmp/sim
 
 # 自研 KV 框架
-gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/kv \
-    -o /tmp/kv simulator/flash_sim.c frameworks/kv/kv_store.c frameworks/kv/test/main_kv.c \
+gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/common -Iframeworks/kv \
+    -o /tmp/kv simulator/flash_sim.c simulator/flash_hal_adapter.c frameworks/kv/kv_store.c frameworks/kv/test/main_kv.c \
     && /tmp/kv
 
 # EasyFlash（开源 KV 组件）
-gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/easyflash -Iframeworks/easyflash/vendor/inc \
-    -o /tmp/ef simulator/flash_sim.c frameworks/easyflash/ef_port.c \
+gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/common -Iframeworks/easyflash -Iframeworks/easyflash/vendor/inc \
+    -o /tmp/ef simulator/flash_sim.c simulator/flash_hal_adapter.c frameworks/easyflash/ef_port.c \
     frameworks/easyflash/vendor/src/ef_env.c frameworks/easyflash/vendor/src/ef_utils.c \
     frameworks/easyflash/vendor/src/easyflash.c frameworks/easyflash/test/main_easyflash.c && /tmp/ef
 
 # FlashDB（开源 KVDB + FAL）
-gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/flashdb -Iframeworks/flashdb/vendor/inc \
+gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/common -Iframeworks/flashdb -Iframeworks/flashdb/vendor/inc \
     -Iframeworks/flashdb/vendor/fal/inc \
-    -o /tmp/fdb simulator/flash_sim.c frameworks/flashdb/fal_flash_sim_port.c \
+    -o /tmp/fdb simulator/flash_sim.c simulator/flash_hal_adapter.c frameworks/flashdb/fal_flash_sim_port.c \
     frameworks/flashdb/vendor/src/fdb.c frameworks/flashdb/vendor/src/fdb_utils.c \
     frameworks/flashdb/vendor/src/fdb_kvdb.c frameworks/flashdb/vendor/src/fdb_tsdb.c \
     frameworks/flashdb/vendor/src/fdb_file.c frameworks/flashdb/vendor/fal/src/fal.c \
@@ -232,32 +243,32 @@ gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/flashdb -Iframeworks/flashdb
     frameworks/flashdb/test/main_flashdb.c && /tmp/fdb
 
 # 裸机结构体配置（A/B 双备份 + CRC）
-gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/baremetal \
-    -o /tmp/bm simulator/flash_sim.c frameworks/baremetal/bm_config.c \
+gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/common -Iframeworks/baremetal \
+    -o /tmp/bm simulator/flash_sim.c simulator/flash_hal_adapter.c frameworks/baremetal/bm_config.c \
     frameworks/baremetal/test/main_baremetal.c && /tmp/bm
 
 # fast_flashdb_table（轻量表组件）
-gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/fastflash \
+gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/common -Iframeworks/fastflash \
     -Iframeworks/fastflash/vendor/fast_flashdb_table/core \
-    -o /tmp/flt simulator/flash_sim.c \
+    -o /tmp/flt simulator/flash_sim.c simulator/flash_hal_adapter.c \
     frameworks/fastflash/vendor/fast_flashdb_table/core/fast_flash_core.c \
     frameworks/fastflash/vendor/fast_flashdb_table/core/fast_flash_log.c \
     frameworks/fastflash/fastflash_sim_port.c \
     frameworks/fastflash/test/main_fastflash.c && /tmp/flt
 
 # Airoha NVDM（KV/裸机持久化组件）
-gcc -std=c99 -Wall -Wextra -DMTK_NVDM_ENABLE -Isimulator -Iframeworks/nvdm \
+gcc -std=c99 -Wall -Wextra -DMTK_NVDM_ENABLE -Isimulator -Iframeworks/common -Iframeworks/nvdm \
     -Iframeworks/nvdm/vendor/inc \
-    -o /tmp/nvdm simulator/flash_sim.c frameworks/nvdm/nvdm_sim_port.c \
+    -o /tmp/nvdm simulator/flash_sim.c simulator/flash_hal_adapter.c frameworks/nvdm/nvdm_sim_port.c \
     frameworks/nvdm/vendor/src/nvdm_main.c frameworks/nvdm/vendor/src/nvdm_data.c \
     frameworks/nvdm/vendor/src/nvdm_io.c \
     frameworks/nvdm/test/main_nvdm.c && /tmp/nvdm
 
 # Zephyr FCB（闪存环形缓冲；共享 zephyr_compat 兼容层）
 gcc -std=c99 -Wall -Wextra -DCONFIG_FLASH_HAS_EXPLICIT_ERASE \
-    -Isimulator -Iframeworks/zephyr_compat -Iframeworks/zephyr_compat/include \
+    -Isimulator -Iframeworks/common -Iframeworks/zephyr_compat -Iframeworks/zephyr_compat/include \
     -Iframeworks/fcb/vendor/include \
-    -o /tmp/fcb simulator/flash_sim.c frameworks/zephyr_compat/zephyr_compat.c \
+    -o /tmp/fcb simulator/flash_sim.c simulator/flash_hal_adapter.c frameworks/zephyr_compat/zephyr_compat.c \
     frameworks/fcb/vendor/fcb.c frameworks/fcb/vendor/fcb_append.c \
     frameworks/fcb/vendor/fcb_elem_info.c frameworks/fcb/vendor/fcb_getnext.c \
     frameworks/fcb/vendor/fcb_rotate.c frameworks/fcb/vendor/fcb_walk.c \
@@ -265,47 +276,47 @@ gcc -std=c99 -Wall -Wextra -DCONFIG_FLASH_HAS_EXPLICIT_ERASE \
 
 # Zephyr NVS（KV/裸机持久化）
 gcc -std=c99 -Wall -Wextra -DCONFIG_FLASH_HAS_EXPLICIT_ERASE \
-    -Isimulator -Iframeworks/zephyr_compat -Iframeworks/zephyr_compat/include \
+    -Isimulator -Iframeworks/common -Iframeworks/zephyr_compat -Iframeworks/zephyr_compat/include \
     -Iframeworks/nvs/vendor/include \
-    -o /tmp/nvs simulator/flash_sim.c frameworks/zephyr_compat/zephyr_compat.c \
+    -o /tmp/nvs simulator/flash_sim.c simulator/flash_hal_adapter.c frameworks/zephyr_compat/zephyr_compat.c \
     frameworks/nvs/vendor/nvs.c frameworks/nvs/test/main_nvs.c && /tmp/nvs
 
 # Zephyr ZMS（KV/固定槽位存储）
 gcc -std=c99 -Wall -Wextra -DCONFIG_FLASH_HAS_EXPLICIT_ERASE \
-    -Isimulator -Iframeworks/zephyr_compat -Iframeworks/zephyr_compat/include \
+    -Isimulator -Iframeworks/common -Iframeworks/zephyr_compat -Iframeworks/zephyr_compat/include \
     -Iframeworks/zms/vendor/include \
-    -o /tmp/zms simulator/flash_sim.c frameworks/zephyr_compat/zephyr_compat.c \
+    -o /tmp/zms simulator/flash_sim.c simulator/flash_hal_adapter.c frameworks/zephyr_compat/zephyr_compat.c \
     frameworks/zms/vendor/zms.c frameworks/zms/test/main_zms.c && /tmp/zms
 
 # TYM Setting（ID静态表/RAM镜像，去耦裁剪）
-gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/tym_setting \
+gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/common -Iframeworks/tym_setting \
     -Iframeworks/tym_setting/vendor/inc -Iframeworks/tym_setting/config \
     -Iframeworks/tym_setting/compat \
-    -o /tmp/tym simulator/flash_sim.c frameworks/tym_setting/tym_setting_sim_port.c \
+    -o /tmp/tym simulator/flash_sim.c simulator/flash_hal_adapter.c frameworks/tym_setting/tym_setting_sim_port.c \
     frameworks/tym_setting/vendor/src/app_setting_idle_activity.c \
     frameworks/tym_setting/vendor/src/StorageDrv.c \
     frameworks/tym_setting/test/main_tym_setting.c && /tmp/tym
 
 # 自研文件系统框架
-gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/fs \
-    -o /tmp/fs simulator/flash_sim.c frameworks/fs/fs_store.c \
+gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/common -Iframeworks/fs \
+    -o /tmp/fs simulator/flash_sim.c simulator/flash_hal_adapter.c frameworks/fs/fs_store.c \
     frameworks/fs/test/main_fs.c && /tmp/fs
 
 # LittleFS（开源文件系统）
-gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/littlefs -Iframeworks/littlefs/vendor \
-    -o /tmp/lfs simulator/flash_sim.c frameworks/littlefs/littlefs_sim_port.c \
+gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/common -Iframeworks/littlefs -Iframeworks/littlefs/vendor \
+    -o /tmp/lfs simulator/flash_sim.c simulator/flash_hal_adapter.c frameworks/littlefs/littlefs_sim_port.c \
     frameworks/littlefs/vendor/lfs.c frameworks/littlefs/vendor/lfs_util.c \
     frameworks/littlefs/test/main_littlefs.c && /tmp/lfs
 
 # FatFs（开源文件系统）
-gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/fatfs -Iframeworks/fatfs/vendor \
-    -o /tmp/ff simulator/flash_sim.c frameworks/fatfs/fatfs_sim_port.c \
+gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/common -Iframeworks/fatfs -Iframeworks/fatfs/vendor \
+    -o /tmp/ff simulator/flash_sim.c simulator/flash_hal_adapter.c frameworks/fatfs/fatfs_sim_port.c \
     frameworks/fatfs/vendor/ff.c frameworks/fatfs/vendor/ffsystem.c \
     frameworks/fatfs/vendor/ffunicode.c frameworks/fatfs/test/main_fatfs.c && /tmp/ff
 
 # SPIFFS（开源文件系统）
-gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/spiffs -Iframeworks/spiffs/vendor \
-    -o /tmp/spiffs simulator/flash_sim.c frameworks/spiffs/spiffs_sim_port.c \
+gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/common -Iframeworks/spiffs -Iframeworks/spiffs/vendor \
+    -o /tmp/spiffs simulator/flash_sim.c simulator/flash_hal_adapter.c frameworks/spiffs/spiffs_sim_port.c \
     frameworks/spiffs/vendor/spiffs_nucleus.c frameworks/spiffs/vendor/spiffs_hydrogen.c \
     frameworks/spiffs/vendor/spiffs_gc.c frameworks/spiffs/vendor/spiffs_check.c \
     frameworks/spiffs/vendor/spiffs_cache.c \
@@ -315,8 +326,8 @@ gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/spiffs -Iframeworks/spiffs/v
 gcc -std=c99 -DCONFIG_YAFFS_DIRECT -DCONFIG_YAFFS_DEFINES_TYPES \
     -DCONFIG_YAFFS_PROVIDE_DEFS -DCONFIG_YAFFSFS_PROVIDE_VALUES \
     -include frameworks/yaffs/yaffs_host_types.h \
-    -Isimulator -Iframeworks/yaffs -Iframeworks/yaffs/vendor \
-    -o /tmp/yaffs simulator/flash_sim.c frameworks/yaffs/yaffs_sim_port.c \
+    -Isimulator -Iframeworks/common -Iframeworks/yaffs -Iframeworks/yaffs/vendor \
+    -o /tmp/yaffs simulator/flash_sim.c simulator/flash_hal_adapter.c frameworks/yaffs/yaffs_sim_port.c \
     frameworks/yaffs/vendor/yaffsfs.c frameworks/yaffs/vendor/yaffs_guts.c \
     frameworks/yaffs/vendor/yaffs_allocator.c frameworks/yaffs/vendor/yaffs_tagscompat.c \
     frameworks/yaffs/vendor/yaffs_tagsmarshall.c frameworks/yaffs/vendor/yaffs_nand.c \
@@ -356,9 +367,10 @@ gcc -std=c99 -DCONFIG_YAFFS_DIRECT -DCONFIG_YAFFS_DEFINES_TYPES \
    （写入/读取/更新/耐久/掉电安全/混合），可调数据项数/长度/轮数等，也可一键
    「批量跑全部组件」——统一任务引擎通过适配层调用各组件，实时输出性能统计
    （吞吐、写放大、介质阻塞、磨损分布）做横向对比。
-4. **导入库文件（闭环验证）**：上传刚下载的 zip → 后端校验是否符合模拟基座接口要求
-   （`manifest.requires=="flash_sim"` 且源码 `#include "flash_sim.h"`）、编译运行自带自检 →
-   通过后注册为可用框架，出现在①中可直接「运行测试」。
+4. **导入库文件（闭环验证）**：上传刚下载的 zip → 后端校验是否符合统一 HAL 契约
+   （`manifest.requires=="flash_hal"` 且源码依赖 `flash_hal.h`；兼容旧 `flash_sim` 包）、
+   编译运行自带自检（新契约包自包含，无需平台代码）→ 通过后注册为可用框架，
+   出现在①中可直接「运行测试」。
 
 **模拟基座可配置指标**：类型(NOR/NAND/EEPROM)、总容量、擦除块大小、最小写入单位、
 标称擦写寿命、读/写/擦耗时(us)、固定坏块数量、运行时坏块比率。运行时统一统计读/写/擦次数、
@@ -413,7 +425,11 @@ gcc -std=c99 -DCONFIG_YAFFS_DIRECT -DCONFIG_YAFFS_DEFINES_TYPES \
 │  fastflash/nvdm/nvs/zms/fcb/tym_setting) 文件系统(fs/littlefs/│
 │  fatfs/spiffs/yaffs)                                          │
 │  每个组件 = vendor 源码(零修改) + sim_port 移植层              │
-│        │ 仅调用 flash_sim 统一接口                            │
+│        │ 仅调用统一 HAL 契约 flash_hal_t（注册式 read/write/erase）│
+├──────────────────────────────────────────────────────────────┤
+│ 统一 HAL 契约 (frameworks/common/flash_hal.h)                 │
+│  目标平台实现 read/write/erase 注册即可用（框架零改动）        │
+│        │ 平台内经 flash_hal_adapter 桥接 / 导出包经 flash_hal_mem │
 ├──────────────────────────────────────────────────────────────┤
 │ 驱动层 (simulator/flash_sim)                                  │
 │  NOR/NAND/EEPROM 物理仿真：块擦除/位翻转/寿命/坏块/耗时        │
@@ -431,9 +447,9 @@ gcc -std=c99 -DCONFIG_YAFFS_DIRECT -DCONFIG_YAFFS_DEFINES_TYPES \
 - `importer.py`：导入 zip 校验与注册。
 
 所有生成的 C 库均可脱离本平台，直接移植到真实 MCU Flash 驱动（仅需按
-`include/flash_sim.h` 契约将 `flash_sim_*` 替换为真实驱动实现，见包内
-`PORTING.md` 与 `HAL_CONTRACT.md`；也可将包目录连同 `AI_PORTING_PROMPT.md`
-交给目标工程里的 AI 完成移植适配）。
+`include/flash_hal.h` 契约实现 `flash_hal_t` 的 `read/write/erase` 三个回调
+并注册给框架，库本体零改动，见包内 `PORTING.md` 与 `HAL_CONTRACT.md`；
+也可将包目录连同 `AI_PORTING_PROMPT.md` 交给目标工程里的 AI 完成移植适配）。
 
 ## 从其他项目提取 Flash 框架（AI 提示词）
 
@@ -460,18 +476,24 @@ gcc -std=c99 -DCONFIG_YAFFS_DIRECT -DCONFIG_YAFFS_DEFINES_TYPES \
 ├── PORTING.md          完整移植文档（API / HAL 契约 / 配置 / 编译 / 集成 / 限制 / 验证）
 ├── HAL_CONTRACT.md     统一适配接口契约（所有框架一致的 Flash 操作抽象）
 ├── AI_PORTING_PROMPT.md 给目标工程 AI 的移植提示词（可直接投喂）
-├── manifest.json       { id, name, requires:"flash_sim", entry, lib,
+├── manifest.json       { id, name, requires:"flash_hal", entry, lib,
                            lib_sources:[...], cflags, includes, params }
-├── core/               框架核心（平台无关）或 HAL 参考实现 core/flash_sim.c
+├── core/               框架核心（平台无关）+ 内存 HAL 参考实现 core/flash_hal_mem.c
 ├── vendor/             开源/厂商源码（零修改，只读）
 ├── port/               平台移植层（目标平台替换/重写点）
 ├── config/             配置文件模板（分区/几何参数）
-├── include/            对外公共头 + HAL 契约头 include/flash_sim.h
+├── include/            对外公共头 + 统一 HAL 契约头 include/flash_hal.h
 └── demo/               自检入口 test_main.c + 构建说明 BUILD.md（可 PC 一键冒烟）
 ```
 
-导入校验规则：缺 manifest、requires≠flash_sim、源码未依赖 flash_sim.h、
-或编译/运行自带自检失败，均会被拒绝并给出原因。开源组件（easyflash/flashdb）
+**统一 HAL 契约**：所有导出库只依赖 `include/flash_hal.h` 的 `flash_hal_t`
+（注册式 `read/write/erase` + 几何参数）。demo 用包自带的 `core/flash_hal_mem.c`
+内存介质直接跑通，移植时仅需把该参考实现换成真实驱动的 `flash_hal_t`。
+
+导入校验规则：缺 manifest、requires 非 flash_hal/flash_sim、源码未依赖
+flash_hal.h（或旧版 flash_sim.h）、或编译/运行自带自检失败，均会被拒绝并给出
+原因。新契约（flash_hal）包自包含（自带内存 HAL），无需链接平台代码。开源
+组件（easyflash/flashdb）
 导出包内含上游多源文件，运行时会一并编译 `lib_sources` 列出的库源；zephyr 系
 组件（fcb/nvs/zms）保留 `<zephyr/...>` 头路径结构，由 `manifest.includes`
 声明 include 目录。
@@ -494,7 +516,11 @@ gcc -std=c99 -DCONFIG_YAFFS_DIRECT -DCONFIG_YAFFS_DEFINES_TYPES \
 - [x] 模块二 开源文件系统 **FatFs**（ChaN R0.16：FAT12/16 格式化 + 多文件操作），经扇区读改写移植层对接模拟基座运行验证通过
 - [x] 模块二 开源文件系统 **SPIFFS**（pellepl：SPI NOR 掉电安全 + 垃圾回收），经 HAL 回调移植层对接模拟基座运行验证通过
 - [x] 模块二 开源文件系统 **YAFFS**（YAFFS2 Direct，GPL v2：NAND 日志型 + 检查点 + 磨损均衡），经 chunk+oob 驱动移植层对接模拟基座运行验证通过
-- [x] 模块三 代码生成引擎（导出库包：core/vendor/port/config/include/demo 分层 + 统一 HAL 契约 + 完整 PORTING.md + **AI 移植提示词**，全部 16 组件可导出）+ 导入闭环校验（保留子目录结构，支持 manifest.includes/相对 cflags）
+- [x] 模块三 代码生成引擎（导出库包：core/vendor/port/config/include/demo 分层 + 完整 PORTING.md + **AI 移植提示词**，全部 16 组件可导出）+ 导入闭环校验（保留子目录结构，支持 manifest.includes/相对 cflags）
+- [x] **统一 HAL 契约解耦**：新增 `frameworks/common/flash_hal.h`（注册式 read/write/erase），
+  全部 16 组件与 app 适配层改为只依赖该契约（去掉 flash_sim 平台绑定）；导出包自带
+  零依赖内存介质 `core/flash_hal_mem.c`，demo/导入均自包含；平台内通过
+  `simulator/flash_hal_adapter.c` 桥接模拟基座，真实目标仅需按契约实现驱动
 - [x] 模块四 前端模拟运行界面（选框架 / **配置化表单（基座+测试）** / 性能统计卡片 / **磨损柱状图** / 生成下载 / 导入验证）
 - [x] 工程化 统一测试脚本（`scripts/run_tests.sh` 一键跑全部 18 项测试）、框架注册表独立（`backend/registry.py`）、后端/导入支持框架级 `cflags`
 - [x] **应用层测试框架（三层架构）**：驱动层(模拟基座) → 组件层(裸机/KV/文件系统) → 应用层测试框架

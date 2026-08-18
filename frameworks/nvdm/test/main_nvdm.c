@@ -29,6 +29,7 @@
 
 #include "nvdm.h"
 
+#include "flash_hal_adapter.h"
 #include "flash_sim.h"
 #include "nvdm_sim_port.h"
 
@@ -349,8 +350,12 @@ int main(void)
     /* 全片擦除，保证从干净介质开始（避免历史 BIN 残留干扰） */
     flash_sim_erase(dev, 0, capacity);
 
+    /* 打开介质 -> 包装为统一 flash_hal_t -> 注册给移植层 */
+    flash_hal_t hal;
+    flash_hal_from_sim(dev, cfg.total_size, cfg.erase_size, cfg.write_size, &hal);
+
     /* 注入移植层参数，然后初始化 NVDM */
-    nvdm_sim_setup(dev, 0, capacity, cfg.erase_size, NVDM_ITEM_COUNT);
+    nvdm_sim_setup(&hal, 0, capacity, cfg.erase_size, NVDM_ITEM_COUNT);
     if (nvdm_init() != NVDM_STATUS_OK) {
         printf("  [FAIL] nvdm_init 失败\n");
         flash_sim_deinit(dev);
