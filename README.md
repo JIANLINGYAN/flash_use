@@ -1,8 +1,18 @@
 # Flash 存储仿真平台
 
-嵌入式 Flash 存储管理设计与仿真平台。已完成 **模块一（模拟基座）**、
-**模块二（KV/NVS 框架 + 常见开源 KV 组件 + 裸机双备份框架 + 轻量表组件 +
-文件系统框架含开源组件）**，并提供 **前端模拟运行界面** 进行可视化验证。
+嵌入式 Flash 存储管理设计与仿真平台。采用**三层架构**：
+
+1. **驱动层（模拟基座）**：`simulator/flash_sim` —— NOR/NAND/EEPROM 物理
+   特性仿真，独立性能检测（读写擦次数/耗时/磨损统计）与参数配置。
+2. **组件层**：`frameworks/*` —— 各类适配了模拟基座的存储组件，分为
+   **裸机简单框架 / KV 管理 / 文件系统** 三类。组件本体（尤其开源组件
+   vendor）零修改，只新增移植层（sim_port）。
+3. **应用层测试框架**：`app/*` —— 统一任务引擎，通过**适配层**
+   （`app/adapter/*`）调用组件层，对不同任务执行对应测试选项，并独立
+   做**性能计算**（吞吐 / 写放大 / 介质阻塞 / 磨损分布 / 掉电安全）。
+
+并提供 **前端模拟运行界面** 进行可视化验证（左侧框架按分类分组展示，
+含独立"应用层测试"标签页做跨组件横向对比）。
 
 ## 项目结构
 
@@ -11,7 +21,15 @@ flash_use/
 ├── simulator/            # 模块一：模拟基座（C 库）
 │   ├── flash_sim.h/.c    #   统一 Flash 接口 read/write/erase，BIN 落盘
 │   └── test/main_sim.c   #   自检：NOR/NAND/EEPROM 物理特性
-├── frameworks/           # 模块二：存储框架库（对接 simulator，可移植 C）
+├── app/                  # 应用层测试框架（统一任务引擎 + 适配层）
+│   ├── app_common.h      #   测试选项/任务/结果统计/组件适配器接口定义
+│   ├── app_register.c/.h #   适配器自注册表（构造函数注册）
+│   ├── app_util.c/.h     #   环境变量/计时/STATS_JSON 输出
+│   ├── app_task.c/.h     #   任务引擎：write/read/update/durability/powerloss/mixed
+│   ├── adapter/          #   组件适配器（kv_store/easyflash/flashdb/fastflash/
+│   │                     #   baremetal/fs_store/littlefs/fatfs/spiffs/yaffs）
+│   └── test/main_app.c   #   统一入口（APP_COMPONENT + APP_TASK 选择）
+├── frameworks/           # 组件层：存储框架库（对接 simulator，可移植 C）
 │   ├── kv/               #   自研 KV/NVS 框架
 │   │   ├── kv_store.h/.c #     两步提交掉电安全 + CRC + 压实 GC
 │   │   └── test/main_kv.c#     运行验证
@@ -62,8 +80,11 @@ flash_use/
 │   ├── index.html        #   选框架 → 运行 → 看结果
 │   ├── app.js
 │   └── style.css
+├── docs/
+│   └── prompt_extract_framework.md  # AI 提取提示词：从其他项目提取 flash 框架
 ├── scripts/              # 构建/工具脚本
-│   ├── run_tests.py/.sh  #   一键编译并运行全部框架测试
+│   ├── run_tests.py/.sh  #   一键编译并运行全部框架测试（--app 跑应用层测试）
+│   ├── check_app_build.py#   快速验证全部组件应用层编译
 │   └── run_server.sh     #   启动后端服务
 ├── imports/              # 导入库落地目录（运行时生成，已被 gitignore）
 └── README.md
@@ -110,7 +131,51 @@ flash_use/
 > 测试脚本复用 `backend/registry.py` 注册表，编译/运行参数与后端
 > `/api/run` 完全一致（BIN 落盘到各框架 `test/` 目录）。
 
-### 2. 命令行直接验证（手动 gcc）
+### 2. 应用层测试（统一任务引擎 + 适配层）
+
+应用层测试框架对不同组件执行**同一任务、同一指标**的横向对比：
+
+```bash
+# 批量跑全部支持应用层测试的组件（默认 durability 任务）
+python3 scripts/run_tests.py --app
+
+# 只跑指定组件（- 需先进入 venv 或直接 python3 运行）
+python3 scripts/run_tests.py --app kv littlefs
+
+# 编译验证全部组件应用层配置
+python3 scripts/check_app_build.py
+```
+
+命令行直接运行单个组件应用层测试：
+
+```bash
+gcc -std=c99 -Wall -Wextra -D_POSIX_C_SOURCE=199309L \
+    -Iapp -Isimulator -Iframeworks/kv \
+    -o /tmp/app_kv simulator/flash_sim.c app/app_register.c app/app_util.c \
+    app/app_task.c app/test/main_app.c app/adapter/kv_store_ad.c \
+    frameworks/kv/kv_store.c
+
+# APP_COMPONENT 选组件，APP_TASK 选任务（write/read/update/durability/powerloss/mixed）
+APP_COMPONENT=kv APP_TASK=durability APP_ITEMS=10 APP_VLEN=32 /tmp/app_kv
+```
+
+应用层测试选项（环境变量，均可省略）：
+
+| 变量 | 含义 | 默认 |
+|------|------|------|
+| `APP_COMPONENT` | 组件 id（kv/easyflash/flashdb/fastflash/baremetal/fs/littlefs/fatfs/spiffs/yaffs） | 列出已注册组件 |
+| `APP_TASK` | write / read / update / durability / powerloss / mixed | durability |
+| `APP_ITEMS` | 数据项数量 | 10 |
+| `APP_VLEN` | 单条数据长度（字节） | 32 |
+| `APP_ROUNDS` | 轮数 | 20 |
+| `APP_FREQ` | 每轮修改比例(%) | 50 |
+| `APP_CAPACITY` | 组件区容量（0=适配器按介质自决） | 0 |
+| `SIM_*` | 模拟基座参数（类型/容量/块/寿命/耗时/坏块） | 见模拟基座 |
+
+输出 `STATS_JSON:{...}` 与 `WEARMAP:...`，含吞吐、写放大、介质阻塞耗时、
+磨损分布等应用层独立计算指标。
+
+### 3. 命令行直接验证（手动 gcc）
 
 ```bash
 # 模拟基座自检
@@ -196,14 +261,16 @@ gcc -std=c99 -DCONFIG_YAFFS_DIRECT -DCONFIG_YAFFS_DEFINES_TYPES \
     frameworks/yaffs/test/main_yaffs.c && /tmp/yaffs
 ```
 
-### 3. 前端（模拟运行 + 代码生成 + 导入闭环）
+### 4. 前端（模拟运行 + 应用层测试 + 代码生成 + 导入闭环）
 
 ```bash
 ./scripts/run_server.sh --port 8000   # 等价于 python3 backend/server.py --port 8000
 # 浏览器打开 http://localhost:8000
 ```
 
-页面三段式流程：
+页面流程：
+0. **左侧框架分类展示**：框架按「驱动层 · 模拟基座 / 组件层 · 裸机简单管理 /
+   组件层 · KV 管理 / 组件层 · 文件系统」分组列出。
 1. **选择框架并运行测试**：选内置/已导入框架 → 展开「模拟基座配置」与「测试配置」表单
    （可配置介质类型/容量/擦除块大小/最小写入单位/标称寿命/读写擦耗时/坏块数量与比率、
    KV 条目数/长度/修改轮数/修改频率等）→ 「运行测试」→ 逐行结果 + 性能统计卡片 +
@@ -212,7 +279,11 @@ gcc -std=c99 -DCONFIG_YAFFS_DIRECT -DCONFIG_YAFFS_DEFINES_TYPES \
    （含 `.c/.h` + `test_main.c` 自检入口 + `PORTING.md` 移植说明 + `manifest.json`）。
    可导出：kv / simulator / easyflash / flashdb / baremetal / fs / littlefs /
    fatfs / spiffs / yaffs。
-3. **导入库文件（闭环验证）**：上传刚下载的 zip → 后端校验是否符合模拟基座接口要求
+3. **应用层测试（跨组件对比）**：在「应用层测试」标签页选择组件与任务
+   （写入/读取/更新/耐久/掉电安全/混合），可调数据项数/长度/轮数等，也可一键
+   「批量跑全部组件」——统一任务引擎通过适配层调用各组件，实时输出性能统计
+   （吞吐、写放大、介质阻塞、磨损分布）做横向对比。
+4. **导入库文件（闭环验证）**：上传刚下载的 zip → 后端校验是否符合模拟基座接口要求
    （`manifest.requires=="flash_sim"` 且源码 `#include "flash_sim.h"`）、编译运行自带自检 →
    通过后注册为可用框架，出现在①中可直接「运行测试」。
 
@@ -246,23 +317,54 @@ gcc -std=c99 -DCONFIG_YAFFS_DIRECT -DCONFIG_YAFFS_DEFINES_TYPES \
 
 ## 架构链路
 
+### 运行链路
+
 ```
 前端(浏览器) → 后端 API(Python)
                 ├─ 代码生成引擎(generator.py) → 导出 zip 库包
                 ├─ 导入校验(importer.py)     → 解压/校验/编译运行/注册
+                ├─ 应用层测试(/api/app/run)   → 编译运行 app/main_app.c（统一任务引擎）
                 └─ 仿真服务                    → 编译运行 C 测试程序 → 模拟基座 → BIN 物理介质
+```
+
+### 存储软件分层（三层架构）
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│ 应用层测试框架 (app/)                                         │
+│  统一任务引擎(任务+选项) → 独立性能计算(吞吐/写放大/磨损)      │
+│        │ 通过适配层调用组件，不感知组件内部实现                │
+├──────────────────────────────────────────────────────────────┤
+│ 组件层 (frameworks/)                                          │
+│  裸机简单框架(baremetal)  KV 管理(kv/easyflash/flashdb/       │
+│  fastflash)  文件系统(fs/littlefs/fatfs/spiffs/yaffs)         │
+│  每个组件 = vendor 源码(零修改) + sim_port 移植层              │
+│        │ 仅调用 flash_sim 统一接口                            │
+├──────────────────────────────────────────────────────────────┤
+│ 驱动层 (simulator/flash_sim)                                  │
+│  NOR/NAND/EEPROM 物理仿真：块擦除/位翻转/寿命/坏块/耗时        │
+│  独立性能检测与参数配置                                        │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 后端模块职责：
 
-- `registry.py`：框架注册表（元数据：源码组成/编译参数/测试项/schema），
-  被 `server.py`、测试脚本共享，新增框架只改此处。
-- `server.py`：HTTP 服务 + 编译运行 + SSE 流式推送（纯标准库）。
+- `registry.py`：框架注册表（元数据：源码组成/编译参数/测试项/schema/
+  分类/app 适配器映射），被 `server.py`、测试脚本共享，新增框架只改此处。
+- `server.py`：HTTP 服务 + 编译运行 + SSE 流式推送 + 应用层测试接口
+  `/api/app/run(/stream)`（纯标准库）。
 - `generator.py`：导出库包生成。
 - `importer.py`：导入 zip 校验与注册。
 
 所有生成的 C 库均可脱离本平台，直接移植到真实 MCU Flash 驱动（仅需将
 `flash_sim_*` 替换为真实驱动实现，见包内 `PORTING.md`）。
+
+## 从其他项目提取 Flash 框架（AI 提示词）
+
+需要把其他项目中的 Flash 存储组件（KV / 文件系统 / 裸机配置）导入本平台
+对比测试时，请使用 `docs/prompt_extract_framework.md` 中的提示词交给 AI：
+它会按统一规范提取 vendor 源码（零修改）、编写移植层（sim_port）与适配器
+（app/adapter），并接入应用层测试框架做横向性能对比。
 
 ## 包格式（导入契约）
 
@@ -295,5 +397,12 @@ xxx_library.zip
 - [x] 模块三 代码生成引擎（导出库包：.c/.h + 移植说明，支持 kv/simulator/easyflash/flashdb/baremetal/fs/littlefs/fatfs/spiffs/yaffs）+ 导入闭环校验
 - [x] 模块四 前端模拟运行界面（选框架 / **配置化表单（基座+测试）** / 性能统计卡片 / **磨损柱状图** / 生成下载 / 导入验证）
 - [x] 工程化 统一测试脚本（`scripts/run_tests.sh` 一键跑全部 13 项测试）、框架注册表独立（`backend/registry.py`）、后端/导入支持框架级 `cflags`
+- [x] **应用层测试框架（三层架构）**：驱动层(模拟基座) → 组件层(裸机/KV/文件系统) → 应用层测试框架
+- [x] **应用层统一任务引擎**（`app/app_task.c`）：write/read/update/durability/powerloss/mixed 六类任务
+- [x] **适配层**（`app/adapter/*`）：10 个组件统一适配为 `app_component_t`，组件源码零修改，支持掉电恢复（APP_REINIT）
+- [x] **应用层独立性能计算**：吞吐(ops/s, KB/s)、写放大、介质阻塞耗时、磨损分布、数据丢失校验
+- [x] **前端分类展示**：框架按 驱动层/裸机/KV/文件系统 分组；新增「应用层测试」标签页（单组件/批量对比 + 实时性能卡片）
+- [x] **后端应用层接口**：`/api/app/run` 与 `/api/app/run/stream`（SSE 流式），编译配置由 registry `app_layer_for` 推导
+- [x] **框架提取提示词**：`docs/prompt_extract_framework.md` 指导 AI 从其他项目提取 flash 框架做对比测试
 - [ ] 模块三 AI 接口（规划中，本次未实现）
 - [ ] 模块二 OTA 差分框架（规划中）

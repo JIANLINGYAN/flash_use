@@ -24,6 +24,7 @@ import tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "backend"))
 import registry  # noqa: E402
+from registry import app_layer_for, app_supported  # noqa: E402
 
 GCC = os.environ.get("CC", "gcc")
 CFLAGS = ["-std=c99", "-Wall", "-Wextra", "-D__USE_MINGW_ANSI_STDIO=1"]
@@ -58,7 +59,8 @@ def compile_framework(fw, out_exe):
             extra.append(os.path.join(ROOT, cflags[i + 1]))
         elif a.startswith("-D"):
             extra.append(a)
-    cmd = [GCC] + CFLAGS + extra + inc_flags + ["-o", out_exe] + src_paths
+    cmd = ([GCC] + CFLAGS + ["-D_POSIX_C_SOURCE=199309L"] + extra
+           + inc_flags + ["-o", out_exe] + src_paths)
     rc, _, err = _run(cmd, ROOT, timeout=TIMEOUT_BUILD)
     return rc == 0, err
 
@@ -82,8 +84,59 @@ def run_framework(fw, out_exe, env_extra=None):
     return ok, summary, tail
 
 
+def run_app_test(fw, out_exe, task="durability"):
+    """运行组件的一次应用层测试（任务引擎 + 适配层），返回 (ok, summary, tail)。
+
+    默认运行 durability 任务；返回结果与组件自检格式一致。
+    """
+    layer = app_layer_for(fw["id"])
+    if not layer:
+        return False, ["组件不支持应用层测试"], []
+    workdir = os.path.join(ROOT, fw["workdir"])
+    os.makedirs(workdir, exist_ok=True)
+    env = dict(os.environ)
+    env["APP_COMPONENT"] = fw["id"]
+    env["APP_TASK"] = task
+    rc, out, err = _run([out_exe], workdir, env=env)
+    ok = (rc == 0) and ("全部通过" in out)
+    lines = [l for l in out.splitlines() if l.strip()]
+    summary = [l for l in lines
+               if "全部通过" in l or "存在失败" in l or "[FAIL]" in l
+               or "应用层测试" in l]
+    tail = lines[-3:]
+    if err.strip():
+        tail = tail + err.strip().splitlines()[-3:]
+    return ok, summary, tail
+
+
+def compile_app_test(fw, out_exe):
+    """按应用层配置编译（组件源码 + 适配层 + 应用层核心），返回 (ok, stderr)。"""
+    layer = app_layer_for(fw["id"])
+    if not layer:
+        return False, "组件不支持应用层测试: %s" % fw["id"]
+    src_paths = [os.path.join(ROOT, s) for s in layer["sources"]]
+    for p in src_paths:
+        if not os.path.exists(p):
+            return False, "源文件缺失: %s" % p
+    inc_flags = ["-I" + os.path.join(ROOT, d) for d in layer["includes"]]
+    extra = []
+    cflags = layer["cflags"]
+    for i, a in enumerate(cflags):
+        if a == "-include" and i + 1 < len(cflags):
+            extra.append(a)
+            extra.append(os.path.join(ROOT, cflags[i + 1]))
+        elif a.startswith("-D"):
+            extra.append(a)
+    cmd = ([GCC] + CFLAGS + ["-D_POSIX_C_SOURCE=199309L"] + extra
+           + inc_flags + ["-o", out_exe] + src_paths)
+    rc, _, err = _run(cmd, ROOT, timeout=TIMEOUT_BUILD)
+    return rc == 0, err
+
+
 def main():
-    ids = sys.argv[1:] or None
+    args = [a for a in sys.argv[1:] if a != "--app"]
+    run_app = "--app" in sys.argv
+    ids = args or None
     frameworks = [f for f in registry.FRAMEWORKS
                   if ids is None or f["id"] in ids]
 
@@ -127,6 +180,28 @@ def main():
             if not ok:
                 failed += 1
             results.append((extra["name"], ok, summary, tail))
+
+        # 应用层测试（--app）：统一任务引擎 + 适配层调用组件
+        if run_app and app_supported(fw["id"]):
+            app_exe = os.path.join(tempfile.gettempdir(),
+                                   "flash_use_app_%s_test" % fw["id"])
+            ok, err = compile_app_test(fw, app_exe)
+            if not ok:
+                print("[FAIL] %-24s 应用层测试编译失败" % fw["id"])
+                for l in err.splitlines()[:5]:
+                    print("       %s" % l)
+                failed += 1
+                results.append((fw["id"] + "[app]", False,
+                                ["应用层测试编译失败"], []))
+            else:
+                ok, summary, tail = run_app_test(fw, app_exe)
+                print("[%s] %-24s 应用层测试完成" % ("OK  " if ok else "FAIL",
+                                                    fw["id"] + "[app]"))
+                for s in summary:
+                    print("       %s" % s)
+                if not ok:
+                    failed += 1
+                results.append((fw["id"] + "[app]", ok, summary, tail))
 
     print("\n================ 测试汇总 ================")
     for name, ok, _, _ in results:

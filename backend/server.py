@@ -35,7 +35,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import generator
 import importer
 from registry import (FRAMEWORKS, SIM_ENV_MAP, KV_ENV_MAP,
-                      SIM_TYPE_DEFAULTS, _SIM_SKIP_IF_ZERO, get_framework)
+                      SIM_TYPE_DEFAULTS, _SIM_SKIP_IF_ZERO, get_framework,
+                      app_layer_for, app_supported, APP_TASK_SCHEMA)
 
 
 def find_gcc():
@@ -88,6 +89,138 @@ def parse_output(text):
         "stats": stats,
         "wearmap": wearmap,
     }
+
+
+def build_app_env(fid, config, app_config):
+    """构造应用层测试环境变量：SIM_*（模拟基座）+ APP_*（应用层任务选项）。"""
+    env = dict(os.environ)
+    if config:
+        for k, envk in SIM_ENV_MAP.items():
+            if k in config and config[k] != "":
+                v = config[k]
+                if k in _SIM_SKIP_IF_ZERO and str(v) == "0":
+                    continue
+                env[envk] = str(v)
+    app_env_map = {
+        "task": "APP_TASK",
+        "items": "APP_ITEMS",
+        "vlen": "APP_VLEN",
+        "rounds": "APP_ROUNDS",
+        "freq": "APP_FREQ",
+        "capacity": "APP_CAPACITY",
+    }
+    env["APP_COMPONENT"] = str(fid)
+    if app_config:
+        for k, envk in app_env_map.items():
+            if k in app_config and app_config[k] != "":
+                env[envk] = str(app_config[k])
+    return env
+
+
+def run_app_framework(fid, config=None, app_config=None):
+    """编译并运行"应用层测试"（app/ 统一任务引擎 + 适配层 + 组件）。"""
+    layer = app_layer_for(fid)
+    if not layer:
+        return {"success": False, "error": "组件不支持应用层测试: %s" % fid,
+                "lines": []}
+    fw = get_framework(fid)
+
+    gcc = find_gcc()
+    if not gcc:
+        return {"success": False, "error": "未找到 gcc 编译器", "lines": []}
+
+    src_paths = [os.path.join(ROOT, s) for s in layer["sources"]]
+    for p in src_paths:
+        if not os.path.exists(p):
+            return {"success": False, "error": "源文件缺失: %s" % p, "lines": []}
+
+    inc_flags = ["-I" + os.path.join(ROOT, d) for d in layer["includes"]]
+    cflags = []
+    for i, a in enumerate(layer["cflags"]):
+        if a == "-include" and i + 1 < len(layer["cflags"]):
+            cflags.append(a)
+            cflags.append(os.path.join(ROOT, layer["cflags"][i + 1]))
+        elif a.startswith("-D"):
+            cflags.append(a)
+    workdir = os.path.join(ROOT, fw["workdir"])
+    os.makedirs(workdir, exist_ok=True)
+
+    tmp_exe = os.path.join(tempfile.gettempdir(),
+                           "flash_use_app_%s" % fid)
+    cmd = [gcc, "-std=c99", "-Wall", "-Wextra",
+           "-D__USE_MINGW_ANSI_STDIO=1",
+           "-D_POSIX_C_SOURCE=199309L"] + cflags + inc_flags + \
+          ["-o", tmp_exe] + src_paths
+
+    try:
+        build = subprocess.run(cmd, capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=60)
+    except subprocess.TimeoutExpired:
+        return {"success": False, "error": "编译超时", "lines": []}
+    if build.returncode != 0:
+        return {"success": False, "error": "编译失败",
+                "lines": [{"level": "fail", "text": l}
+                          for l in build.stderr.splitlines()]}
+
+    try:
+        t0 = time.time()
+        run = subprocess.run([tmp_exe], cwd=workdir,
+                             env=build_app_env(fid, config, app_config),
+                             capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", timeout=180)
+        elapsed = time.time() - t0
+    except subprocess.TimeoutExpired:
+        return {"success": False, "error": "运行超时", "lines": []}
+
+    parsed = parse_output(run.stdout)
+    parsed["elapsed_ms"] = int(elapsed * 1000)
+    parsed["return_code"] = run.returncode
+    if run.returncode != 0:
+        parsed["success"] = False
+    if run.stderr.strip():
+        for l in run.stderr.splitlines():
+            parsed["lines"].append({"level": "stderr", "text": l})
+    return parsed
+
+
+def run_app_framework_stream(fid, config=None, app_config=None):
+    """应用层测试的流式运行生成器（build -> log -> done）。"""
+    layer = app_layer_for(fid)
+    if not layer:
+        yield {"event": "done", "result": {"success": False,
+                                           "error": "组件不支持应用层测试: %s" % fid,
+                                           "lines": []}}
+        return
+    fw = get_framework(fid)
+    src_paths = [os.path.join(ROOT, s) for s in layer["sources"]]
+    for p in src_paths:
+        if not os.path.exists(p):
+            yield {"event": "done", "result": {"success": False,
+                                               "error": "源文件缺失: %s" % p,
+                                               "lines": []}}
+            return
+    exe, build = _compile_exe(src_paths, layer["includes"], "app_" + fid,
+                              cflags=layer["cflags"])
+    if not exe or build is None:
+        yield {"event": "log", "level": "stderr",
+               "text": "未找到 gcc 编译器，无法编译"}
+        yield {"event": "done", "result": {"success": False,
+                                           "error": "未找到 gcc 编译器",
+                                           "lines": []}}
+        return
+    if build.returncode != 0:
+        for l in build.stderr.splitlines():
+            yield {"event": "log", "level": "fail", "text": l}
+        yield {"event": "done", "result": {"success": False,
+                                           "error": "编译失败", "lines": []}}
+        return
+    workdir = os.path.join(ROOT, fw["workdir"])
+    os.makedirs(workdir, exist_ok=True)
+    yield {"event": "log", "level": "info",
+           "text": "[build] 应用层测试编译成功，开始运行…"}
+    for ev in _stream_run(exe, workdir, build_app_env(fid, config, app_config),
+                          "app_" + fid):
+        yield ev
 
 
 def _build_env(fw, config, test_config):
@@ -486,6 +619,25 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(b"event: end\ndata: {}\n\n")
         self.wfile.flush()
 
+    def _stream_run_sse_app(self, fid, config, app_config):
+        """应用层测试 SSE 流式运行。"""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        try:
+            for ev in run_app_framework_stream(fid, config, app_config):
+                data = json.dumps(ev, ensure_ascii=False)
+                self.wfile.write(("event: %s\n" % ev.get("event", "log")).encode("utf-8"))
+                self.wfile.write(("data: %s\n\n" % data).encode("utf-8"))
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        self.wfile.write(b"event: end\ndata: {}\n\n")
+        self.wfile.flush()
+
     def _send_file(self, path, ctype):
         try:
             with open(path, "rb") as f:
@@ -525,6 +677,8 @@ class Handler(BaseHTTPRequestHandler):
         elif route == "/api/frameworks":
             builtin = [
                 {"id": f["id"], "name": f["name"], "desc": f["desc"],
+                 "category": f.get("category", ""),
+                 "app_supported": app_supported(f["id"]),
                  "config_schema": f.get("config_schema", []),
                  "test_schema": f.get("test_schema", []),
                  "test_items": f.get("test_items", [])}
@@ -538,7 +692,9 @@ class Handler(BaseHTTPRequestHandler):
                 for k, v in SIM_TYPE_DEFAULTS.items()
             }
             self._send_json(
-                {"frameworks": builtin + imported, "sim_type_defaults": defaults}
+                {"frameworks": builtin + imported,
+                 "sim_type_defaults": defaults,
+                 "app_task_schema": APP_TASK_SCHEMA}
             )
         else:
             self.send_error(404, "Not Found")
@@ -563,6 +719,17 @@ class Handler(BaseHTTPRequestHandler):
             config = payload.get("config", {})
             test_config = payload.get("test_config", {})
             self._stream_run_sse(fid, config, test_config)
+        elif parsed.path == "/api/app/run":
+            fid = payload.get("framework", "")
+            config = payload.get("config", {})
+            app_config = payload.get("app_config", {})
+            result = run_app_framework(fid, config, app_config)
+            self._send_json(result)
+        elif parsed.path == "/api/app/run/stream":
+            fid = payload.get("framework", "")
+            config = payload.get("config", {})
+            app_config = payload.get("app_config", {})
+            self._stream_run_sse_app(fid, config, app_config)
         elif parsed.path == "/api/generate":
             fid = payload.get("framework", "")
             params = payload.get("params", {})

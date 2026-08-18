@@ -65,14 +65,26 @@
   // 按介质类型（NOR/NAND/EEPROM）刷新的模拟基座字段默认值映射，
   // 由后端 /api/frameworks 返回，避免前端硬编码。
   var simTypeDefaults = {};
+  // 应用层测试任务 schema 与分类标签，由后端返回。
+  var appTaskSchema = [];
+  var categoryLabels = {
+    simulator: "驱动层 · 模拟基座",
+    baremetal: "组件层 · 裸机简单管理",
+    kv: "组件层 · KV 管理",
+    fs: "组件层 · 文件系统",
+  };
+  // 分类排序（决定左侧分组顺序）
+  var categoryOrder = ["simulator", "baremetal", "kv", "fs"];
 
   function loadFrameworks() {
     els.list.innerHTML = '<p class="hint">正在加载框架列表…</p>';
     api("GET", "/api/frameworks").then(function (data) {
       frameworks = data.frameworks || [];
       simTypeDefaults = data.sim_type_defaults || {};
+      appTaskSchema = data.app_task_schema || [];
       renderList();
       renderGenSelect();
+      renderAppConfig();
       if (frameworks.length > 0 && !selectedId) select(frameworks[0].id);
     }).catch(function (e) {
       els.list.innerHTML = '<p class="hint">加载失败：' + e + "</p>";
@@ -101,16 +113,42 @@
     });
   }
 
+  /* 按分类分组渲染框架列表。
+   * 分组顺序：simulator(驱动层) -> baremetal(裸机) -> kv -> fs，
+   * 每个分组带标题；未标注 category 的框架归入"其他"。 */
   function renderList() {
     els.list.innerHTML = "";
+    var groups = {};
     frameworks.forEach(function (f) {
-      var item = document.createElement("button");
-      item.className = "fw-item" + (f.id === selectedId ? " selected" : "");
-      item.innerHTML = '<span class="fw-dot"></span><span class="fw-name">' + f.name + "</span>";
-      item.title = f.desc || "";
-      item.onclick = function () { select(f.id); };
-      els.list.appendChild(item);
+      var cat = f.category || "other";
+      if (!groups[cat]) groups[cat] = [];
+      groups[cat].push(f);
     });
+    categoryOrder.forEach(function (cat) {
+      if (!groups[cat]) return;
+      renderCategoryTitle(cat);
+      groups[cat].forEach(function (f) { appendFwItem(f); });
+    });
+    if (groups.other) {
+      renderCategoryTitle("other");
+      groups.other.forEach(function (f) { appendFwItem(f); });
+    }
+  }
+
+  function renderCategoryTitle(cat) {
+    var t = document.createElement("div");
+    t.className = "fw-cat";
+    t.textContent = categoryLabels[cat] || "其他";
+    els.list.appendChild(t);
+  }
+
+  function appendFwItem(f) {
+    var item = document.createElement("button");
+    item.className = "fw-item" + (f.id === selectedId ? " selected" : "");
+    item.innerHTML = '<span class="fw-dot"></span><span class="fw-name">' + f.name + "</span>";
+    item.title = (f.desc || "") + (f.app_supported ? "\n[支持应用层测试]" : "");
+    item.onclick = function () { select(f.id); };
+    els.list.appendChild(item);
   }
 
   function selectedFramework() {
@@ -575,6 +613,278 @@
       return isNaN(n) ? 0 : n;
     });
   }
+
+  // ---------- 应用层测试（统一任务引擎 + 适配层） ----------
+  var appEls = {
+    config: document.getElementById("app-config"),
+    runBtn: document.getElementById("app-run-btn"),
+    runAllBtn: document.getElementById("app-run-all-btn"),
+    result: document.getElementById("app-result"),
+    rtStatus: document.getElementById("app-rt-status"),
+    rtBody: document.getElementById("app-rt-body"),
+    rtClear: document.getElementById("app-rt-clear"),
+    output: document.getElementById("app-output"),
+    wearWrap: document.getElementById("app-wear"),
+    wearCanvas: document.getElementById("app-wear-canvas"),
+  };
+
+  function renderAppConfig() {
+    appEls.config.innerHTML = "";
+    if (!appTaskSchema.length) {
+      appEls.config.innerHTML = '<p class="hint">后端未返回应用层测试配置。</p>';
+      return;
+    }
+    // 组件选择（仅支持应用层测试的组件）
+    var compRow = makeLabel("组件");
+    var compSel = document.createElement("select");
+    compSel.className = "select";
+    compSel.id = "app-component";
+    frameworks.forEach(function (f) {
+      if (!f.app_supported) return;
+      var opt = document.createElement("option");
+      opt.value = f.id;
+      opt.textContent = f.name;
+      compSel.appendChild(opt);
+    });
+    compRow.appendChild(compSel);
+    appEls.config.appendChild(compRow);
+
+    // 任务与参数（来自后端 app_task_schema）
+    appTaskSchema.forEach(function (p) {
+      var row = makeLabel(p.label);
+      row.style.gridColumn = "auto";
+      if (p.type === "select") {
+        var sel = document.createElement("select");
+        sel.dataset.key = p.key;
+        (p.options || []).forEach(function (o) {
+          var opt = document.createElement("option");
+          opt.value = o[0]; opt.textContent = o[1];
+          if (String(o[0]) === String(p.default)) opt.selected = true;
+          sel.appendChild(opt);
+        });
+        row.appendChild(sel);
+      } else {
+        var inp = document.createElement("input");
+        inp.type = "number";
+        inp.dataset.key = p.key;
+        inp.value = p.default;
+        if (p.min != null) inp.min = p.min;
+        if (p.max != null) inp.max = p.max;
+        if (p.step != null) inp.step = p.step;
+        row.appendChild(inp);
+      }
+      appEls.config.appendChild(row);
+    });
+  }
+
+  function makeLabel(text) {
+    var row = document.createElement("label");
+    row.className = "cfg-row";
+    var span = document.createElement("span");
+    span.textContent = text;
+    row.appendChild(span);
+    return row;
+  }
+
+  function collectAppConfig() {
+    var app_config = {};
+    appEls.config.querySelectorAll("input[data-key],select[data-key]").forEach(function (inp) {
+      app_config[inp.dataset.key] = inp.type === "number" ? Number(inp.value) : inp.value;
+    });
+    return { framework: appEls.config.querySelector("#app-component").value,
+             config: {}, app_config: app_config };
+  }
+
+  /* 通用 SSE 消费（与 runTest 相同的帧解析逻辑） */
+  function streamConsume(reader, onEvent) {
+    var dec = new TextDecoder("utf-8");
+    var buf = "";
+    function pump() {
+      return reader.read().then(function (r) {
+        if (r.done) return;
+        buf += dec.decode(r.value, { stream: true });
+        var frames = buf.split("\n\n");
+        buf = frames.pop();
+        frames.forEach(function (fr) {
+          var ev = "log", data = "";
+          fr.split("\n").forEach(function (ln) {
+            if (ln.indexOf("event:") === 0) ev = ln.slice(6).trim();
+            else if (ln.indexOf("data:") === 0) data += ln.slice(5).trim();
+          });
+          if (!data) return;
+          try { onEvent(ev, JSON.parse(data)); } catch (e) {}
+        });
+        return pump();
+      });
+    }
+    return pump();
+  }
+
+  function appAppendLog(level, text) {
+    var span = document.createElement("span");
+    span.className = "line-" + level;
+    span.textContent = text + "\n";
+    appEls.rtBody.appendChild(span);
+    appEls.rtBody.scrollTop = appEls.rtBody.scrollHeight;
+    if (text.indexOf("STATS_JSON:") === 0) {
+      try { appRenderStats(JSON.parse(text.slice("STATS_JSON:".length).trim())); } catch (e) {}
+    }
+    if (text.indexOf("WEARMAP:") === 0) {
+      appRenderWear(text.slice("WEARMAP:".length).trim());
+    }
+  }
+
+  function appRun(componentOverride) {
+    var body = collectAppConfig();
+    if (componentOverride) body.framework = componentOverride;
+    appEls.result.classList.remove("hidden");
+    appEls.output.innerHTML = "";
+    appEls.rtBody.innerHTML = "";
+    appEls.rtStatus.textContent = "运行中…";
+    appEls.rtStatus.className = "rt-log-status running";
+    appEls.wearWrap.classList.add("hidden");
+    appEls.runBtn.disabled = true;
+    appEls.runAllBtn.disabled = true;
+
+    fetch("/api/app/run/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    }).then(function (resp) {
+      if (!resp.ok) throw new Error("HTTP " + resp.status);
+      var reader = resp.body.getReader();
+      var allLines = [];
+      return streamConsume(reader, function (ev, obj) {
+        if (ev === "log") {
+          allLines.push({ level: obj.level || "info", text: obj.text || "" });
+          appAppendLog(obj.level || "info", obj.text || "");
+        } else if (ev === "done") {
+          var res = obj.result || {};
+          allLines.forEach(function (l) {
+            var span = document.createElement("span");
+            span.className = "line-" + l.level;
+            span.textContent = l.text + "\n";
+            appEls.output.appendChild(span);
+          });
+          if (res.error) {
+            var e = document.createElement("span");
+            e.className = "line-fail";
+            e.textContent = "错误：" + res.error + "\n";
+            appEls.output.appendChild(e);
+          }
+          var ok = !res.error && (!res.lost || res.lost === 0);
+          appEls.rtStatus.textContent = ok ? "完成（通过）" : "完成（失败）";
+          appEls.rtStatus.className = "rt-log-status " + (ok ? "ok" : "fail");
+        }
+      });
+    }).catch(function (e) {
+      appAppendLog("stderr", "请求失败：" + e);
+      appEls.rtStatus.textContent = "错误";
+      appEls.rtStatus.className = "rt-log-status fail";
+    }).then(function () {
+      appEls.runBtn.disabled = false;
+      appEls.runAllBtn.disabled = false;
+    });
+  }
+
+  /* 批量跑全部支持应用层测试的组件（串行，日志打标签） */
+  function appRunAll() {
+    var comps = frameworks.filter(function (f) { return f.app_supported; });
+    if (!comps.length) return;
+    var seq = 0;
+    appEls.result.classList.remove("hidden");
+    appEls.rtBody.innerHTML = "";
+    appEls.rtStatus.textContent = "批量运行中…";
+    appEls.rtStatus.className = "rt-log-status running";
+    appEls.runBtn.disabled = true;
+    appEls.runAllBtn.disabled = true;
+
+    function next() {
+      if (seq >= comps.length) {
+        appEls.rtStatus.textContent = "批量完成";
+        appEls.rtStatus.className = "rt-log-status ok";
+        appEls.runBtn.disabled = false;
+        appEls.runAllBtn.disabled = false;
+        return;
+      }
+      var f = comps[seq++];
+      appAppendLog("info", "===== [" + seq + "/" + comps.length + "] 组件: " + f.name + " =====");
+      fetch("/api/app/run/stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ framework: f.id, config: {}, app_config: collectAppConfig().app_config })
+      }).then(function (resp) {
+        var reader = resp.body.getReader();
+        return streamConsume(reader, function (ev, obj) {
+          if (ev === "log") appAppendLog(obj.level || "info", "[" + f.id + "] " + obj.text);
+        });
+      }).catch(function (e) {
+        appAppendLog("stderr", "[" + f.id + "] 请求失败：" + e);
+      }).then(next);
+    }
+    next();
+  }
+
+  function appRenderStats(stats) {
+    var items = [
+      ["模式", stats.mode], ["操作数", stats.ops], ["数据丢失", stats.lost],
+      ["墙钟(us)", stats.wall_us], ["介质阻塞(us)", stats.block_us],
+      ["读/写/擦", (stats.reads || 0) + " / " + (stats.writes || 0) + " / " + (stats.erases || 0)],
+      ["有效写入(B)", stats.app_bytes], ["介质写入(B)", stats.media_bytes],
+      ["写放大", stats.write_amp], ["吞吐(ops/s)", stats.ops_per_sec],
+      ["吞吐(KB/s)", stats.kbps], ["最大擦写", stats.max_cycles],
+      ["平均擦写", stats.avg_cycles], ["坏块", stats.bad_blocks],
+    ];
+    var html = '<div class="perf-grid">';
+    items.forEach(function (it) {
+      if (it[1] === undefined || it[1] === null) return;
+      html += '<div class="perf-item"><span class="perf-num">' + it[1] +
+              '</span><span class="perf-label">' + it[0] + "</span></div>";
+    });
+    html += "</div>";
+    var w = document.createElement("div");
+    w.innerHTML = '<h3>应用层性能统计</h3>' + html;
+    var old = appEls.output.querySelector(".perf-grid");
+    var h = appEls.output.querySelector("h3");
+    if (h) { h.textContent = "应用层性能统计"; h.parentNode.insertBefore(w.firstChild, h); }
+    if (old) old.replaceWith(w.lastChild);
+    else appEls.output.insertAdjacentHTML("afterbegin", w.outerHTML);
+  }
+
+  function appRenderWear(raw) {
+    var map = raw.split(",").map(function (x) { var n = parseInt(x, 10); return isNaN(n) ? 0 : n; });
+    if (!map.length) return;
+    var c = appEls.wearCanvas, ctx = c.getContext("2d");
+    var W = c.width, H = c.height;
+    ctx.clearRect(0, 0, W, H);
+    var maxCycle = Math.max.apply(null, map.concat([1]));
+    var n = map.length, cellSize = 13, gap = 3;
+    var cols = Math.floor((W - 20) / (cellSize + gap));
+    if (cols < 4) cols = 4;
+    var rows = Math.ceil(n / cols);
+    for (var i = 0; i < n; i++) {
+      var ratio = map[i] / maxCycle;
+      var hue = ratio === 0 ? 210 : (ratio < .25 ? 130 : ratio < .5 ? 100 : ratio < .75 ? 45 : 5);
+      ctx.fillStyle = "hsl(" + hue + ", 60%, 40%)";
+      var x = 10 + (i % cols) * (cellSize + gap);
+      var y = 10 + Math.floor(i / cols) * (cellSize + gap);
+      ctx.fillRect(x, y, cellSize, cellSize);
+      if (map[i] > 0) {
+        ctx.fillStyle = "#fff";
+        ctx.font = "9px sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText(String(map[i]), x + cellSize / 2, y + cellSize / 2);
+      }
+    }
+    appEls.wearWrap.classList.remove("hidden");
+  }
+
+  appEls.runBtn.onclick = function () { appRun(null); };
+  appEls.runAllBtn.onclick = appRunAll;
+  appEls.rtClear.onclick = function () {
+    appEls.rtBody.innerHTML = '<span class="hint">日志已清空。</span>';
+    appEls.output.innerHTML = "";
+  };
 
   // ---------- 代码生成 ----------
   function renderGenSelect() {

@@ -102,20 +102,123 @@ SIM_CONFIG_SCHEMA = [
 
 
 # ---------------------------------------------------------------------------
+# 框架分类（前端分组展示 + 应用层测试路由）
+#   simulator   驱动层：模拟基座
+#   baremetal   组件层：裸机简单框架
+#   kv          组件层：KV 管理框架
+#   fs          组件层：文件系统框架
+# ---------------------------------------------------------------------------
+CATEGORY_SIMULATOR = "simulator"
+CATEGORY_BAREMETAL = "baremetal"
+CATEGORY_KV = "kv"
+CATEGORY_FS = "fs"
+
+# 分类展示名（前端分组标题）
+CATEGORY_LABELS = {
+    CATEGORY_SIMULATOR: "驱动层 · 模拟基座",
+    CATEGORY_BAREMETAL: "组件层 · 裸机简单管理",
+    CATEGORY_KV: "组件层 · KV 管理",
+    CATEGORY_FS: "组件层 · 文件系统",
+}
+
+# ---------------------------------------------------------------------------
+# 应用层测试框架（app/）：统一任务引擎通过适配层调用组件层。
+# APP_CORE_SOURCES 为应用层公共源码（与具体组件无关），编译任一组件时
+# 均需链接；APP_ADAPTER_MAP 描述"组件 id -> 适配层源文件"。
+# ---------------------------------------------------------------------------
+APP_CORE_SOURCES = [
+    "app/app_register.c",
+    "app/app_util.c",
+    "app/app_task.c",
+    "app/test/main_app.c",
+]
+APP_CORE_INCLUDES = ["app", "simulator"]
+
+APP_ADAPTER_MAP = {
+    "kv": "app/adapter/kv_store_ad.c",
+    "easyflash": "app/adapter/easyflash_ad.c",
+    "flashdb": "app/adapter/flashdb_ad.c",
+    "fastflash": "app/adapter/fastflash_ad.c",
+    "baremetal": "app/adapter/baremetal_ad.c",
+    "fs": "app/adapter/fs_store_ad.c",
+    "littlefs": "app/adapter/littlefs_ad.c",
+    "fatfs": "app/adapter/fatfs_ad.c",
+    "spiffs": "app/adapter/spiffs_ad.c",
+    "yaffs": "app/adapter/yaffs_ad.c",
+}
+
+# 应用层测试任务 schema（前端"应用层测试"表单）
+APP_TASK_SCHEMA = [
+    {"key": "task", "label": "测试任务", "type": "select",
+     "options": [
+         ["write", "写入性能"],
+         ["read", "读取性能"],
+         ["update", "更新覆盖"],
+         ["durability", "耐久性/磨损"],
+         ["powerloss", "掉电安全"],
+         ["mixed", "混合读写"],
+     ], "default": "durability", "group": "app"},
+    {"key": "items", "label": "数据项数量", "type": "number",
+     "default": 50, "min": 1, "step": 1, "group": "app"},
+    {"key": "vlen", "label": "单条数据长度(字节)", "type": "number",
+     "default": 32, "min": 1, "step": 1, "group": "app"},
+    {"key": "rounds", "label": "轮数", "type": "number",
+     "default": 20, "min": 1, "step": 1, "group": "app"},
+    {"key": "freq", "label": "修改频率(%)", "type": "number",
+     "default": 50, "min": 0, "max": 100, "step": 1, "group": "app"},
+    {"key": "capacity", "label": "组件区容量(字节)", "type": "number",
+     "default": 8192, "min": 1024, "step": 1024, "group": "app"},
+]
+
+
+def app_layer_for(fid):
+    """返回组件 id 的应用层测试配置：{sources, includes, cflags, adapter}。
+
+    由框架注册项推导：组件源码 + 适配层 + 应用层核心 + 应用层入口，
+    includes 合并组件头目录与应用层目录。
+    """
+    fw = get_framework(fid)
+    if not fw:
+        return None
+    adapter = APP_ADAPTER_MAP.get(fid)
+    if not adapter:
+        return None
+    # 组件源码：注册项 sources 中剔除测试入口（test/ 路径）
+    comp_sources = [s for s in fw["sources"]
+                    if "/test/" not in s and s != "simulator/flash_sim.c"]
+    sources = (["simulator/flash_sim.c"]
+               + APP_CORE_SOURCES + [adapter] + comp_sources)
+    includes = list(APP_CORE_INCLUDES) + list(fw.get("includes", []))
+    return {
+        "sources": sources,
+        "includes": includes,
+        "cflags": list(fw.get("cflags", [])),
+        "adapter": adapter,
+    }
+
+
+def app_supported(fid):
+    """组件是否支持应用层测试（存在适配器）。"""
+    return fid in APP_ADAPTER_MAP
+
+
+# ---------------------------------------------------------------------------
 # 框架注册表：描述每个可测试框架的源码组成与编译方式。
 # 每个框架：
-#   id        唯一标识
-#   name      展示名
-#   desc      简介
-#   sources   参与编译的 C 源文件（相对项目根）
-#   includes  编译 -I 包含目录（相对项目根）
-#   workdir   测试运行时的工作目录（用于放置 BIN，相对项目根）
+#   id          唯一标识
+#   name        展示名
+#   category    分类（simulator/baremetal/kv/fs）
+#   desc        简介
+#   sources     参与编译的 C 源文件（相对项目根）
+#   includes    编译 -I 包含目录（相对项目根）
+#   workdir     测试运行时的工作目录（用于放置 BIN，相对项目根）
 #   config_schema / test_schema / test_items  前端表单与测试项
 # ---------------------------------------------------------------------------
 FRAMEWORKS = [
     {
         "id": "simulator",
         "name": "模拟基座 (NOR/NAND/EEPROM)",
+        "category": CATEGORY_SIMULATOR,
         "desc": "Flash 物理特性模拟：按块擦除、写入仅允许 1->0、EEPROM 字节写、"
                 "寿命统计、坏块模拟。可配置类型/容量/块大小/速度/坏点。",
         "sources": ["simulator/flash_sim.c", "simulator/test/main_sim.c"],
@@ -134,6 +237,7 @@ FRAMEWORKS = [
     {
         "id": "kv",
         "name": "KV/NVS 存储框架",
+        "category": CATEGORY_KV,
         "desc": "基于模拟基座的键值存储：两步提交掉电安全、CRC 校验、后写覆盖、"
                 "删除、压实垃圾回收。支持功能压测（条目数/长度/修改频率）。",
         "sources": [
@@ -162,6 +266,7 @@ FRAMEWORKS = [
     {
         "id": "easyflash",
         "name": "EasyFlash (ENV/KV 开源组件)",
+        "category": CATEGORY_KV,
         "desc": "成熟开源 KV 框架（armink/EasyFlash V4.x NG 模式）：内置磨损均衡、"
                 "掉电保护（状态表多阶段提交）与垃圾回收。通过 ef_port 适配本平台"
                 "模拟基座，可独立导出使用。",
@@ -199,6 +304,7 @@ FRAMEWORKS = [
     {
         "id": "flashdb",
         "name": "FlashDB (KVDB 开源组件)",
+        "category": CATEGORY_KV,
         "desc": "EasyFlash 作者的下一代作品（armink/FlashDB），KVDB 同样具备磨损均衡、"
                 "掉电保护与垃圾回收，并支持 blob 接口。通过 FAL 移植层对接模拟基座。",
         "sources": [
@@ -242,6 +348,7 @@ FRAMEWORKS = [
     {
         "id": "baremetal",
         "name": "裸机结构体配置 (A/B 双备份 + CRC)",
+        "category": CATEGORY_BAREMETAL,
         "desc": "最简单的裸机架构：把业务结构体整块映射到 Flash，A/B 双分区交替备份，"
                 "CRC32 校验 + 单调序号掉电恢复，无需序列化。附带磨损统计。",
         "sources": [
@@ -275,6 +382,7 @@ FRAMEWORKS = [
         "_comment": "用户开源组件 fast_flashdb_table：轻量表存储，仅依赖 flash_ops_t 移植接口；"
                     "vendor 源码零修改，移植层对接 simulator 模拟基座",
         "name": "fast_flashdb_table 组件",
+        "category": CATEGORY_KV,
         "desc": "轻量表存储组件，支持建表/按索引读写/追加/删除/GC/掉电重放。对接本平台模拟基座。",
         "open_source": True,
         "vendor": "JIANLINGYAN/fast_flashdb_table",
@@ -323,6 +431,7 @@ FRAMEWORKS = [
     {
         "id": "fs",
         "name": "自研文件系统 (fs_store)",
+        "category": CATEGORY_FS,
         "desc": "基于模拟基座的简易块式文件系统：文件分配表 + 数据块，支持多文件"
                 "读写、某文件频繁修改（原地覆盖/扩展迁移）、追加、删除与查询。",
         "sources": [
@@ -354,6 +463,7 @@ FRAMEWORKS = [
     {
         "id": "littlefs",
         "name": "LittleFS (开源文件系统)",
+        "category": CATEGORY_FS,
         "desc": "littlefs-project/littlefs v2.x：面向嵌入式的小型掉电安全文件系统，"
                 "具备掉电保护、磨损均衡与动态磨损感知。通过移植层对接模拟基座。",
         "open_source": True,
@@ -388,6 +498,7 @@ FRAMEWORKS = [
     {
         "id": "fatfs",
         "name": "FatFs (开源文件系统)",
+        "category": CATEGORY_FS,
         "desc": "ChaN/FatFs R0.16：通用 FAT/exFAT 文件系统模块，经移植层（扇区"
                 "读写读改写）对接模拟基座，支持多文件读写、频繁修改、增删查询。",
         "open_source": True,
@@ -423,6 +534,7 @@ FRAMEWORKS = [
     {
         "id": "spiffs",
         "name": "SPIFFS (开源文件系统)",
+        "category": CATEGORY_FS,
         "desc": "pellepl/SPIFFS：面向 SPI NOR Flash 的小型文件系统，日志结构 + "
                 "垃圾回收，掉电安全。通过移植层对接模拟基座。",
         "open_source": True,
@@ -460,6 +572,7 @@ FRAMEWORKS = [
     {
         "id": "yaffs",
         "name": "YAFFS (开源文件系统)",
+        "category": CATEGORY_FS,
         "desc": "YAFFS2 Direct（GPL v2）：面向 NAND Flash 的日志型文件系统，"
                 "磨损均衡 + 掉电保护 + 检查点。经移植层以 chunk+oob 布局"
                 "对接模拟基座。",
