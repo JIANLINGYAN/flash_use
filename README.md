@@ -2,7 +2,7 @@
 
 嵌入式 Flash 存储管理设计与仿真平台。已完成 **模块一（模拟基座）**、
 **模块二（KV/NVS 框架 + 常见开源 KV 组件 + 裸机双备份框架 + 轻量表组件 +
-文件系统框架）**，并提供 **前端模拟运行界面** 进行可视化验证。
+文件系统框架含开源组件）**，并提供 **前端模拟运行界面** 进行可视化验证。
 
 ## 项目结构
 
@@ -39,10 +39,20 @@ flash_use/
 │   │   ├── littlefs_sim_port.c/.h  # 移植层：块设备回调对接模拟基座
 │   │   ├── vendor/       #     upstream 源码（lfs.c/lfs_util.*）
 │   │   └── test/main_littlefs.c
-│   └── fatfs/            #   开源文件系统（ChaN/FatFs R0.16）
-│       ├── fatfs_sim_port.c/.h     # 移植层：扇区读改写对接模拟基座
-│       ├── vendor/       #     upstream 源码（ff.c/ff.h/ffconf.h/...）
-│       └── test/main_fatfs.c
+│   ├── fatfs/            #   开源文件系统（ChaN/FatFs R0.16）
+│   │   ├── fatfs_sim_port.c/.h     # 移植层：扇区读改写对接模拟基座
+│   │   ├── vendor/       #     upstream 源码（ff.c/ff.h/ffconf.h/...）
+│   │   └── test/main_fatfs.c
+│   ├── spiffs/           #   开源文件系统（pellepl/SPIFFS）
+│   │   ├── spiffs_sim_port.c/.h    # 移植层：HAL 回调对接模拟基座
+│   │   ├── spiffs_config.h         # 运行时配置（页/块几何）
+│   │   ├── vendor/       #     upstream 源码（spiffs_nucleus/hydrogen/gc/...）
+│   │   └── test/main_spiffs.c
+│   └── yaffs/            #   开源文件系统（YAFFS2 Direct，GPL v2）
+│       ├── yaffs_sim_port.c/.h     # 移植层：NAND chunk+oob 驱动对接模拟基座
+│       ├── yaffs_host_types.h      # 宿主类型补丁（loff_t/mode_t 等）
+│       ├── vendor/       #     upstream 源码（yaffsfs/guts/tagsmarshall/...）
+│       └── test/main_yaffs.c
 ├── backend/              # 模块三/四后端：仿真服务 + API + 注册表
 │   ├── server.py         #   纯标准库 HTTP 服务：列框架 / 编译运行 / 返回结果
 │   ├── registry.py       #   框架注册表（框架元数据唯一事实来源）
@@ -91,8 +101,10 @@ flash_use/
 [PASS] fs
 [PASS] littlefs
 [PASS] fatfs
+[PASS] spiffs
+[PASS] yaffs
 ===========================================
-通过 11/11
+通过 13/13
 ```
 
 > 测试脚本复用 `backend/registry.py` 注册表，编译/运行参数与后端
@@ -156,6 +168,32 @@ gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/fatfs -Iframeworks/fatfs/ven
     -o /tmp/ff simulator/flash_sim.c frameworks/fatfs/fatfs_sim_port.c \
     frameworks/fatfs/vendor/ff.c frameworks/fatfs/vendor/ffsystem.c \
     frameworks/fatfs/vendor/ffunicode.c frameworks/fatfs/test/main_fatfs.c && /tmp/ff
+
+# SPIFFS（开源文件系统）
+gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/spiffs -Iframeworks/spiffs/vendor \
+    -o /tmp/spiffs simulator/flash_sim.c frameworks/spiffs/spiffs_sim_port.c \
+    frameworks/spiffs/vendor/spiffs_nucleus.c frameworks/spiffs/vendor/spiffs_hydrogen.c \
+    frameworks/spiffs/vendor/spiffs_gc.c frameworks/spiffs/vendor/spiffs_check.c \
+    frameworks/spiffs/vendor/spiffs_cache.c \
+    frameworks/spiffs/test/main_spiffs.c && /tmp/spiffs
+
+# YAFFS（开源文件系统，NAND chunk+oob 布局）
+gcc -std=c99 -DCONFIG_YAFFS_DIRECT -DCONFIG_YAFFS_DEFINES_TYPES \
+    -DCONFIG_YAFFS_PROVIDE_DEFS -DCONFIG_YAFFSFS_PROVIDE_VALUES \
+    -include frameworks/yaffs/yaffs_host_types.h \
+    -Isimulator -Iframeworks/yaffs -Iframeworks/yaffs/vendor \
+    -o /tmp/yaffs simulator/flash_sim.c frameworks/yaffs/yaffs_sim_port.c \
+    frameworks/yaffs/vendor/yaffsfs.c frameworks/yaffs/vendor/yaffs_guts.c \
+    frameworks/yaffs/vendor/yaffs_allocator.c frameworks/yaffs/vendor/yaffs_tagscompat.c \
+    frameworks/yaffs/vendor/yaffs_tagsmarshall.c frameworks/yaffs/vendor/yaffs_nand.c \
+    frameworks/yaffs/vendor/yaffs_checkptrw.c frameworks/yaffs/vendor/yaffs_packedtags1.c \
+    frameworks/yaffs/vendor/yaffs_packedtags2.c frameworks/yaffs/vendor/yaffs_bitmap.c \
+    frameworks/yaffs/vendor/yaffs_verify.c frameworks/yaffs/vendor/yaffs_nameval.c \
+    frameworks/yaffs/vendor/yaffs_attribs.c frameworks/yaffs/vendor/yaffs_yaffs1.c \
+    frameworks/yaffs/vendor/yaffs_yaffs2.c frameworks/yaffs/vendor/yaffs_ecc.c \
+    frameworks/yaffs/vendor/yaffs_hweight.c frameworks/yaffs/vendor/yaffs_summary.c \
+    frameworks/yaffs/vendor/yaffs_endian.c frameworks/yaffs/vendor/yaffs_error.c \
+    frameworks/yaffs/test/main_yaffs.c && /tmp/yaffs
 ```
 
 ### 3. 前端（模拟运行 + 代码生成 + 导入闭环）
@@ -172,7 +210,8 @@ gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/fatfs -Iframeworks/fatfs/ven
    整片**磨损分布柱状图**（颜色越红越接近寿命上限）。
 2. **代码生成（导出库文件）**：选框架、填参数 → 「生成并下载」→ 下载 zip 包
    （含 `.c/.h` + `test_main.c` 自检入口 + `PORTING.md` 移植说明 + `manifest.json`）。
-   可导出：kv / simulator / easyflash / flashdb / baremetal / fs / littlefs / fatfs。
+   可导出：kv / simulator / easyflash / flashdb / baremetal / fs / littlefs /
+   fatfs / spiffs / yaffs。
 3. **导入库文件（闭环验证）**：上传刚下载的 zip → 后端校验是否符合模拟基座接口要求
    （`manifest.requires=="flash_sim"` 且源码 `#include "flash_sim.h"`）、编译运行自带自检 →
    通过后注册为可用框架，出现在①中可直接「运行测试」。
@@ -184,6 +223,26 @@ gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/fatfs -Iframeworks/fatfs/ven
 **KV 功能压测模式**（`KV_FUNC=1`）：可配置条目数量、每条 value 长度、修改轮数、每轮修改比例；
 运行后统计总操作数、数据丢失数、阻塞耗时(读+写+擦耗时之和，模拟 RTOS 下被阻塞时长)，
 并输出整片磨损分布。
+
+## 嵌入式文件系统支持矩阵
+
+常见嵌入式文件系统在本平台的适配情况：
+
+| 文件系统 | 说明 | 平台状态 |
+|----------|------|----------|
+| **LittleFS** | ARM 官方，掉电安全 + 磨损均衡，面向 MCU/NOR | ✅ 已移植（v2.x） |
+| **SPIFFS** | SPI NOR 小文件系统，日志结构 + GC | ✅ 已移植 |
+| **FatFs / FAT** | 通用 FAT12/16/32（可开 exFAT），兼容性好 | ✅ 已移植（R0.16） |
+| **YAFFS / YAFFS2** | 专为 NAND 设计，损耗均衡 + 掉电保护 | ✅ 已移植（Direct） |
+| **JFFS2** | NOR/NAND 日志型，Linux MTD 内核原生 | ❌ 依赖 Linux MTD 子系统，不适合独立移植 |
+| **UBIFS** | NAND 日志型，依赖 UBI/MTD 内核 | ❌ 同上，无法脱离内核运行 |
+| **SquashFS** | 只读压缩文件系统，Linux 内核组件 | ❌ 内核模块，非嵌入式可独立移植组件 |
+| **ext2/3/4** | Linux 桌面/嵌入式常用，依赖 VFS | ❌ 依赖 Linux VFS 层，无法独立移植 |
+| **initramfs** | Linux 启动用的临时内存 FS | ❌ 非独立文件系统框架 |
+
+> 可独立移植的嵌入式文件系统（LittleFS/SPIFFS/FatFs/YAFFS）均已接入本平台，
+> 可通过前端一键运行测试、导出库包；依赖 Linux 内核（MTD/UBI/VFS）的系统
+> 不在本仿真平台范围内。
 
 ## 架构链路
 
@@ -231,8 +290,10 @@ xxx_library.zip
 - [x] 模块二 自研文件系统框架 **fs_store**（块分配表 + 数据块：多文件创建/读写、单文件频繁修改、追加、删除、查询、掉电重放），模拟基座验证通过
 - [x] 模块二 开源文件系统 **LittleFS**（littlefs-project v2.x：掉电安全 + 磨损均衡），经移植层对接模拟基座运行验证通过
 - [x] 模块二 开源文件系统 **FatFs**（ChaN R0.16：FAT12/16 格式化 + 多文件操作），经扇区读改写移植层对接模拟基座运行验证通过
-- [x] 模块三 代码生成引擎（导出库包：.c/.h + 移植说明，支持 kv/simulator/easyflash/flashdb/baremetal/fs/littlefs/fatfs）+ 导入闭环校验
+- [x] 模块二 开源文件系统 **SPIFFS**（pellepl：SPI NOR 掉电安全 + 垃圾回收），经 HAL 回调移植层对接模拟基座运行验证通过
+- [x] 模块二 开源文件系统 **YAFFS**（YAFFS2 Direct，GPL v2：NAND 日志型 + 检查点 + 磨损均衡），经 chunk+oob 驱动移植层对接模拟基座运行验证通过
+- [x] 模块三 代码生成引擎（导出库包：.c/.h + 移植说明，支持 kv/simulator/easyflash/flashdb/baremetal/fs/littlefs/fatfs/spiffs/yaffs）+ 导入闭环校验
 - [x] 模块四 前端模拟运行界面（选框架 / **配置化表单（基座+测试）** / 性能统计卡片 / **磨损柱状图** / 生成下载 / 导入验证）
-- [x] 工程化 统一测试脚本（`scripts/run_tests.sh` 一键跑全部 11 项测试）、框架注册表独立（`backend/registry.py`）
+- [x] 工程化 统一测试脚本（`scripts/run_tests.sh` 一键跑全部 13 项测试）、框架注册表独立（`backend/registry.py`）、后端/导入支持框架级 `cflags`
 - [ ] 模块三 AI 接口（规划中，本次未实现）
 - [ ] 模块二 OTA 差分框架（规划中）

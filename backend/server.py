@@ -158,12 +158,19 @@ def run_framework(fid, config=None, test_config=None):
             return {"success": False, "error": "源文件缺失: %s" % p, "lines": []}
 
     inc_flags = ["-I" + os.path.join(ROOT, d) for d in fw["includes"]]
+    cflags = []
+    for i, a in enumerate(fw.get("cflags", [])):
+        if a == "-include" and i + 1 < len(fw.get("cflags", [])):
+            cflags.append(a)
+            cflags.append(os.path.join(ROOT, fw["cflags"][i + 1]))
+        elif a.startswith("-D"):
+            cflags.append(a)
     workdir = os.path.join(ROOT, fw["workdir"])
     os.makedirs(workdir, exist_ok=True)
 
     tmp_exe = os.path.join(tempfile.gettempdir(), "flash_use_%s_test" % fid)
     cmd = [gcc, "-std=c99", "-Wall", "-Wextra",
-           "-D__USE_MINGW_ANSI_STDIO=1"] + inc_flags + \
+           "-D__USE_MINGW_ANSI_STDIO=1"] + cflags + inc_flags + \
           ["-o", tmp_exe] + src_paths
 
     try:
@@ -203,15 +210,22 @@ def run_framework(fid, config=None, test_config=None):
 #   {"event": "done",   "result": <汇总字典>}
 # 速度控制：每条运行日志推送前小幅节流（~15ms），避免浏览器高频重绘卡顿。
 # ---------------------------------------------------------------------------
-def _compile_exe(sources, includes, fid):
+def _compile_exe(sources, includes, fid, cflags=None):
     """编译测试程序，返回 (tmp_exe, build)。"""
     gcc = find_gcc()
     if not gcc:
         return None, None
     inc_flags = ["-I" + os.path.join(ROOT, d) for d in includes]
+    extra = []
+    for i, a in enumerate(cflags or []):
+        if a == "-include" and i + 1 < len(cflags):
+            extra.append(a)
+            extra.append(os.path.join(ROOT, cflags[i + 1]))
+        elif a.startswith("-D"):
+            extra.append(a)
     tmp_exe = os.path.join(tempfile.gettempdir(), "flash_use_%s_test" % fid)
     cmd = [gcc, "-std=c99", "-Wall", "-Wextra",
-           "-D__USE_MINGW_ANSI_STDIO=1"] + inc_flags + \
+           "-D__USE_MINGW_ANSI_STDIO=1"] + extra + inc_flags + \
           ["-o", tmp_exe] + sources
     try:
         build = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
@@ -348,7 +362,8 @@ def run_framework_stream(fid, config=None, test_config=None):
                                                    "error": "源文件缺失: %s" % p,
                                                    "lines": []}}
                 return
-        exe, build = _compile_exe(src_paths, fw["includes"], fid)
+        exe, build = _compile_exe(src_paths, fw["includes"], fid,
+                                  cflags=fw.get("cflags"))
         workdir = os.path.join(ROOT, fw["workdir"])
 
     if not exe or build is None:
@@ -397,9 +412,17 @@ def _run_imported(fid, manifest, config=None, test_config=None):
             compile_srcs.append(lib_c)
 
     tmp_exe = os.path.join(tempfile.gettempdir(), "flash_use_import_%s" % fid)
+    extra = []
+    mflags = manifest.get("cflags", [])
+    for i, a in enumerate(mflags):
+        if a == "-include" and i + 1 < len(mflags):
+            extra.append(a)
+            extra.append(os.path.join(dest, os.path.basename(mflags[i + 1])))
+        elif a.startswith("-D"):
+            extra.append(a)
     cmd = [gcc, "-std=c99", "-Wall", "-Wextra",
            "-I" + os.path.join(ROOT, "simulator"), "-I" + dest,
-           "-o", tmp_exe] + compile_srcs
+           "-o", tmp_exe] + extra + compile_srcs
 
     build = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
     if build.returncode != 0:

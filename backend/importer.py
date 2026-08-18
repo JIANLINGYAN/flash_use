@@ -139,11 +139,25 @@ def import_zip(zip_bytes):
     compile_srcs = [sim_c, entry_src]
     if lib_c and os.path.exists(lib_c):
         compile_srcs.append(lib_c)
+    # 兼容新导出包的 lib_sources 列表（开源组件含多源文件）
+    for ls in manifest.get("lib_sources", []):
+        p = os.path.join(dest, os.path.basename(ls))
+        if os.path.exists(p):
+            compile_srcs.append(p)
+
+    extra = []
+    mflags = manifest.get("cflags", [])
+    for i, a in enumerate(mflags):
+        if a == "-include" and i + 1 < len(mflags):
+            extra.append(a)
+            extra.append(os.path.join(dest, os.path.basename(mflags[i + 1])))
+        elif a.startswith("-D"):
+            extra.append(a)
 
     tmp_exe = os.path.join(tempfile.gettempdir(), "flash_use_import_%s" % fid)
     cmd = [gcc, "-std=c99", "-Wall", "-Wextra",
            "-I" + os.path.join(ROOT, "simulator"), "-I" + dest,
-           "-o", tmp_exe] + compile_srcs
+           "-o", tmp_exe] + extra + compile_srcs
     build = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     if build.returncode != 0:
         shutil.rmtree(dest, ignore_errors=True)

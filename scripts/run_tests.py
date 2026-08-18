@@ -49,7 +49,16 @@ def compile_framework(fw, out_exe):
         if not os.path.exists(p):
             return False, "源文件缺失: %s" % p
     inc_flags = ["-I" + os.path.join(ROOT, d) for d in fw["includes"]]
-    cmd = [GCC] + CFLAGS + inc_flags + ["-o", out_exe] + src_paths
+    extra = []
+    cflags = fw.get("cflags", [])
+    for i, a in enumerate(cflags):
+        # "-include" 标志后跟的是相对 ROOT 的头文件路径
+        if a == "-include" and i + 1 < len(cflags):
+            extra.append(a)
+            extra.append(os.path.join(ROOT, cflags[i + 1]))
+        elif a.startswith("-D"):
+            extra.append(a)
+    cmd = [GCC] + CFLAGS + extra + inc_flags + ["-o", out_exe] + src_paths
     rc, _, err = _run(cmd, ROOT, timeout=TIMEOUT_BUILD)
     return rc == 0, err
 
