@@ -27,7 +27,7 @@ flash_use/
 │   ├── app_util.c/.h     #   环境变量/计时/STATS_JSON 输出
 │   ├── app_task.c/.h     #   任务引擎：write/read/update/durability/powerloss/mixed
 │   ├── adapter/          #   组件适配器（kv_store/easyflash/flashdb/fastflash/
-│   │                     #   baremetal/fs_store/littlefs/fatfs/spiffs/yaffs）
+│   │                     #   nvdm/baremetal/fs_store/littlefs/fatfs/spiffs/yaffs）
 │   └── test/main_app.c   #   统一入口（APP_COMPONENT + APP_TASK 选择）
 ├── frameworks/           # 组件层：存储框架库（对接 simulator，可移植 C）
 │   ├── kv/               #   自研 KV/NVS 框架
@@ -50,6 +50,10 @@ flash_use/
 │   │   ├── fastflash_sim_port.c/.h  # 移植层：对接模拟基座
 │   │   ├── vendor/fast_flashdb_table# upstream 源码（core/ + port_win/）
 │   │   └── test/main_fastflash.c
+│   ├── nvdm/              #   Airoha NVDM（KV/裸机持久化，厂商专有）
+│   │   ├── nvdm_sim_port.c/.h      # 移植层：nvdm_port_* 契约对接模拟基座
+│   │   ├── vendor/       #     framework 源码（nvdm_main/data/io，零修改）
+│   │   └── test/main_nvdm.c
 │   ├── fs/               #   自研文件系统框架（块分配表 + 数据块）
 │   │   ├── fs_store.h/.c #     多文件读写/频繁修改/追加/删除/查询
 │   │   └── test/main_fs.c
@@ -119,13 +123,14 @@ flash_use/
 [PASS] flashdb
 [PASS] baremetal
 [PASS] fastflash
+[PASS] nvdm
 [PASS] fs
 [PASS] littlefs
 [PASS] fatfs
 [PASS] spiffs
 [PASS] yaffs
 ===========================================
-通过 13/13
+通过 14/14
 ```
 
 > 测试脚本复用 `backend/registry.py` 注册表，编译/运行参数与后端
@@ -163,7 +168,7 @@ APP_COMPONENT=kv APP_TASK=durability APP_ITEMS=10 APP_VLEN=32 /tmp/app_kv
 
 | 变量 | 含义 | 默认 |
 |------|------|------|
-| `APP_COMPONENT` | 组件 id（kv/easyflash/flashdb/fastflash/baremetal/fs/littlefs/fatfs/spiffs/yaffs） | 列出已注册组件 |
+| `APP_COMPONENT` | 组件 id（kv/easyflash/flashdb/fastflash/nvdm/baremetal/fs/littlefs/fatfs/spiffs/yaffs） | 列出已注册组件 |
 | `APP_TASK` | write / read / update / durability / powerloss / mixed | durability |
 | `APP_ITEMS` | 数据项数量 | 10 |
 | `APP_VLEN` | 单条数据长度（字节） | 32 |
@@ -216,6 +221,14 @@ gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/fastflash \
     frameworks/fastflash/vendor/fast_flashdb_table/core/fast_flash_log.c \
     frameworks/fastflash/fastflash_sim_port.c \
     frameworks/fastflash/test/main_fastflash.c && /tmp/flt
+
+# Airoha NVDM（KV/裸机持久化组件）
+gcc -std=c99 -Wall -Wextra -DMTK_NVDM_ENABLE -Isimulator -Iframeworks/nvdm \
+    -Iframeworks/nvdm/vendor/inc \
+    -o /tmp/nvdm simulator/flash_sim.c frameworks/nvdm/nvdm_sim_port.c \
+    frameworks/nvdm/vendor/src/nvdm_main.c frameworks/nvdm/vendor/src/nvdm_data.c \
+    frameworks/nvdm/vendor/src/nvdm_io.c \
+    frameworks/nvdm/test/main_nvdm.c && /tmp/nvdm
 
 # 自研文件系统框架
 gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/fs \
@@ -337,7 +350,7 @@ gcc -std=c99 -DCONFIG_YAFFS_DIRECT -DCONFIG_YAFFS_DEFINES_TYPES \
 ├──────────────────────────────────────────────────────────────┤
 │ 组件层 (frameworks/)                                          │
 │  裸机简单框架(baremetal)  KV 管理(kv/easyflash/flashdb/       │
-│  fastflash)  文件系统(fs/littlefs/fatfs/spiffs/yaffs)         │
+│  fastflash/nvdm)  文件系统(fs/littlefs/fatfs/spiffs/yaffs)    │
 │  每个组件 = vendor 源码(零修改) + sim_port 移植层              │
 │        │ 仅调用 flash_sim 统一接口                            │
 ├──────────────────────────────────────────────────────────────┤
@@ -397,6 +410,7 @@ xxx_library.zip
 - [x] 模块二 开源 KV 组件 **FlashDB**（KVDB + FAL：磨损均衡 + 掉电保护 + GC + blob/遍历），模拟基座验证 0 擦写/GC 错误
 - [x] 模块二 裸机结构体配置框架（A/B 双备份 + CRC32 + 单调序号掉电恢复 + 磨损分摊），模拟基座验证 0 数据丢失
 - [x] 模块二 开源组件 **fast_flashdb_table**（轻量表存储：建表/按索引读写/追加/删除/GC/掉电重放），经移植层对接模拟基座运行验证通过
+- [x] 模块二 厂商组件 **Airoha NVDM**（KV/裸机持久化：PEB 磨损均衡 + 掉电保护状态机 + 数据项校验和 + GC），经 nvdm_port_* 契约移植层对接模拟基座运行验证通过
 - [x] 模块二 自研文件系统框架 **fs_store**（块分配表 + 数据块：多文件创建/读写、单文件频繁修改、追加、删除、查询、掉电重放），模拟基座验证通过
 - [x] 模块二 开源文件系统 **LittleFS**（littlefs-project v2.x：掉电安全 + 磨损均衡），经移植层对接模拟基座运行验证通过
 - [x] 模块二 开源文件系统 **FatFs**（ChaN R0.16：FAT12/16 格式化 + 多文件操作），经扇区读改写移植层对接模拟基座运行验证通过
@@ -404,10 +418,10 @@ xxx_library.zip
 - [x] 模块二 开源文件系统 **YAFFS**（YAFFS2 Direct，GPL v2：NAND 日志型 + 检查点 + 磨损均衡），经 chunk+oob 驱动移植层对接模拟基座运行验证通过
 - [x] 模块三 代码生成引擎（导出库包：.c/.h + 移植说明，支持 kv/simulator/easyflash/flashdb/baremetal/fs/littlefs/fatfs/spiffs/yaffs）+ 导入闭环校验
 - [x] 模块四 前端模拟运行界面（选框架 / **配置化表单（基座+测试）** / 性能统计卡片 / **磨损柱状图** / 生成下载 / 导入验证）
-- [x] 工程化 统一测试脚本（`scripts/run_tests.sh` 一键跑全部 13 项测试）、框架注册表独立（`backend/registry.py`）、后端/导入支持框架级 `cflags`
+- [x] 工程化 统一测试脚本（`scripts/run_tests.sh` 一键跑全部 14 项测试）、框架注册表独立（`backend/registry.py`）、后端/导入支持框架级 `cflags`
 - [x] **应用层测试框架（三层架构）**：驱动层(模拟基座) → 组件层(裸机/KV/文件系统) → 应用层测试框架
 - [x] **应用层统一任务引擎**（`app/app_task.c`）：write/read/update/durability/powerloss/mixed 六类任务
-- [x] **适配层**（`app/adapter/*`）：10 个组件统一适配为 `app_component_t`，组件源码零修改，支持掉电恢复（APP_REINIT）
+- [x] **适配层**（`app/adapter/*`）：11 个组件统一适配为 `app_component_t`，组件源码零修改，支持掉电恢复（APP_REINIT）
 - [x] **应用层独立性能计算**：吞吐(ops/s, KB/s)、写放大、介质阻塞耗时、磨损分布、数据丢失校验
 - [x] **前端分类展示**：框架按 驱动层/裸机/KV/文件系统 分组；新增「应用层测试」标签页（单组件/批量对比 + 实时性能卡片）
 - [x] **后端应用层接口**：`/api/app/run` 与 `/api/app/run/stream`（SSE 流式），编译配置由 registry `app_layer_for` 推导

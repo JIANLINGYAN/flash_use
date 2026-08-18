@@ -139,6 +139,7 @@ APP_ADAPTER_MAP = {
     "easyflash": "app/adapter/easyflash_ad.c",
     "flashdb": "app/adapter/flashdb_ad.c",
     "fastflash": "app/adapter/fastflash_ad.c",
+    "nvdm": "app/adapter/nvdm_ad.c",
     "baremetal": "app/adapter/baremetal_ad.c",
     "fs": "app/adapter/fs_store_ad.c",
     "littlefs": "app/adapter/littlefs_ad.c",
@@ -426,6 +427,49 @@ FRAMEWORKS = [
             {"id": "delete", "label": "删除表"},
             {"id": "gc", "label": "垃圾回收"},
             {"id": "powerloss", "label": "掉电重放"},
+        ],
+    },
+    # ---- Airoha NVDM（KV/裸机持久化组件，厂商专有，经移植层接入模拟基座）----
+    {
+        "id": "nvdm",
+        "_comment": "Airoha NVDM：KV+裸机/RTOS 持久化+分区(PEB)磨损均衡框架；vendor 零修改，"
+                    "移植层 nvdm_sim_port.c 实现 nvdm_port_* 契约并桥接 flash_sim",
+        "name": "Airoha NVDM (KV/裸机持久化)",
+        "category": CATEGORY_KV,
+        "desc": "Airoha NVDM 键值存储组件：PEB 磨损均衡、掉电保护状态机、"
+                "数据项校验和与垃圾回收。经移植层对接本平台模拟基座。",
+        "sources": [
+            "simulator/flash_sim.c",
+            "frameworks/nvdm/vendor/src/nvdm_main.c",
+            "frameworks/nvdm/vendor/src/nvdm_data.c",
+            "frameworks/nvdm/vendor/src/nvdm_io.c",
+            "frameworks/nvdm/nvdm_sim_port.c",
+            "frameworks/nvdm/test/main_nvdm.c",
+        ],
+        "includes": [
+            "simulator",
+            "frameworks/nvdm",
+            "frameworks/nvdm/vendor/inc",
+        ],
+        "cflags": [
+            "-DMTK_NVDM_ENABLE",
+        ],
+        "workdir": "frameworks/nvdm/test",
+        "config_schema": SIM_CONFIG_SCHEMA,
+        "test_schema": [
+            {"key": "capacity", "label": "NVDM 区容量(字节)", "type": "number",
+             "default": 16384, "min": 2048, "step": 1024, "group": "test"},
+            {"key": "rounds", "label": "功能压测轮数", "type": "number",
+             "default": 20, "min": 1, "step": 1, "group": "test"},
+        ],
+        "test_items": [
+            {"id": "write_read", "label": "基础写入/读取"},
+            {"id": "update", "label": "更新覆盖"},
+            {"id": "delete", "label": "删除"},
+            {"id": "powerloss", "label": "掉电安全"},
+            {"id": "gc", "label": "垃圾回收"},
+            {"id": "types", "label": "多类型数据"},
+            {"id": "func", "label": "功能压测(条目表)"},
         ],
     },
     {
