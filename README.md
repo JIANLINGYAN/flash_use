@@ -1,8 +1,8 @@
 # Flash 存储仿真平台
 
 嵌入式 Flash 存储管理设计与仿真平台。已完成 **模块一（模拟基座）**、
-**模块二（KV/NVS 框架 + 常见开源 KV 组件 + 裸机双备份框架）**，并提供
-**前端模拟运行界面** 进行可视化验证。
+**模块二（KV/NVS 框架 + 常见开源 KV 组件 + 裸机双备份框架 + 轻量表组件）**，
+并提供 **前端模拟运行界面** 进行可视化验证。
 
 ## 项目结构
 
@@ -25,27 +25,67 @@ flash_use/
 │   │   ├── fdb_cfg.h/fal_cfg.h
 │   │   ├── vendor/       #     upstream 源码（fdb_* + fal_*）
 │   │   └── test/main_flashdb.c
-│   └── baremetal/        #   裸机结构体配置框架（A/B 双备份 + CRC32 + 单调序号）
-│       ├── bm_config.h/.c #     结构体整块映射、掉电恢复
-│       └── test/main_baremetal.c
-├── backend/              # 模块三/四后端：仿真服务 + API
+│   ├── baremetal/        #   裸机结构体配置框架（A/B 双备份 + CRC32 + 单调序号）
+│   │   ├── bm_config.h/.c
+│   │   └── test/main_baremetal.c
+│   └── fastflash/        #   开源组件 fast_flashdb_table（轻量表存储）
+│       ├── fastflash_sim_port.c/.h  # 移植层：对接模拟基座
+│       ├── vendor/fast_flashdb_table# upstream 源码（core/ + port_win/）
+│       └── test/main_fastflash.c
+├── backend/              # 模块三/四后端：仿真服务 + API + 注册表
 │   ├── server.py         #   纯标准库 HTTP 服务：列框架 / 编译运行 / 返回结果
+│   ├── registry.py       #   框架注册表（框架元数据唯一事实来源）
 │   ├── generator.py      #   代码生成引擎（导出库包）
 │   └── importer.py       #   导入校验
 ├── frontend/             # 模块四：前端交互界面
 │   ├── index.html        #   选框架 → 运行 → 看结果
 │   ├── app.js
 │   └── style.css
-└── scripts/              # 构建/工具脚本（预留）
+├── scripts/              # 构建/工具脚本
+│   ├── run_tests.py/.sh  #   一键编译并运行全部框架测试
+│   └── run_server.sh     #   启动后端服务
+├── imports/              # 导入库落地目录（运行时生成，已被 gitignore）
+└── README.md
 ```
 
-> 新增框架按 `frameworks/<name>/` 组织，并在 `backend/server.py` 的
-> FRAMEWORKS 注册表追加一项即可被前端自动发现；`backend/generator.py`
-> 的 RECIPES 追加一项即可支持导出。
+> **新增框架** 只需两步：① 源码放入 `frameworks/<name>/`（含 `test/main_*.c`）；
+> ② 在 `backend/registry.py` 的 `FRAMEWORKS` 注册表追加一项。前端发现、
+> 测试脚本、编译运行都会自动覆盖。需要支持「代码生成导出」时再在
+> `backend/generator.py` 的 `RECIPES` 追加配方（fastflash 当前未接入导出）。
 
 ## 快速开始
 
-### 1. 命令行直接验证（无需前端）
+### 1. 一键运行全部框架测试（推荐）
+
+```bash
+./scripts/run_tests.sh                # 运行全部框架测试
+./scripts/run_tests.sh kv easyflash   # 只运行指定框架（可多选）
+```
+
+输出示例：
+
+```
+[OK  ] simulator                运行完成
+       === 自检结果: 全部通过 ===
+...
+================ 测试汇总 ================
+[PASS] simulator
+[PASS] simulator[NAND]
+[PASS] simulator[EEPROM]
+[PASS] kv
+[PASS] easyflash
+[PASS] flashdb
+[PASS] baremetal
+[PASS] fastflash
+===========================================
+通过 8/8
+```
+
+> 测试脚本复用 `backend/registry.py` 注册表，编译/运行参数与后端
+> `/api/run` 完全一致（BIN 落盘到各框架 `test/` 目录）。
+
+### 2. 命令行直接验证（手动 gcc）
+
 ```bash
 # 模拟基座自检
 gcc -std=c99 -Wall -Wextra -Isimulator \
@@ -76,13 +116,24 @@ gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/flashdb -Iframeworks/flashdb
 gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/baremetal \
     -o /tmp/bm simulator/flash_sim.c frameworks/baremetal/bm_config.c \
     frameworks/baremetal/test/main_baremetal.c && /tmp/bm
+
+# fast_flashdb_table（轻量表组件）
+gcc -std=c99 -Wall -Wextra -Isimulator -Iframeworks/fastflash \
+    -Iframeworks/fastflash/vendor/fast_flashdb_table/core \
+    -o /tmp/flt simulator/flash_sim.c \
+    frameworks/fastflash/vendor/fast_flashdb_table/core/fast_flash_core.c \
+    frameworks/fastflash/vendor/fast_flashdb_table/core/fast_flash_log.c \
+    frameworks/fastflash/fastflash_sim_port.c \
+    frameworks/fastflash/test/main_fastflash.c && /tmp/flt
 ```
 
-### 2. 前端（模拟运行 + 代码生成 + 导入闭环）
+### 3. 前端（模拟运行 + 代码生成 + 导入闭环）
+
 ```bash
-python3 backend/server.py --port 8000
+./scripts/run_server.sh --port 8000   # 等价于 python3 backend/server.py --port 8000
 # 浏览器打开 http://localhost:8000
 ```
+
 页面三段式流程：
 1. **选择框架并运行测试**：选内置/已导入框架 → 展开「模拟基座配置」与「测试配置」表单
    （可配置介质类型/容量/擦除块大小/最小写入单位/标称寿命/读写擦耗时/坏块数量与比率、
@@ -90,6 +141,7 @@ python3 backend/server.py --port 8000
    整片**磨损分布柱状图**（颜色越红越接近寿命上限）。
 2. **代码生成（导出库文件）**：选框架、填参数 → 「生成并下载」→ 下载 zip 包
    （含 `.c/.h` + `test_main.c` 自检入口 + `PORTING.md` 移植说明 + `manifest.json`）。
+   可导出：kv / simulator / easyflash / flashdb / baremetal。
 3. **导入库文件（闭环验证）**：上传刚下载的 zip → 后端校验是否符合模拟基座接口要求
    （`manifest.requires=="flash_sim"` 且源码 `#include "flash_sim.h"`）、编译运行自带自检 →
    通过后注册为可用框架，出现在①中可直接「运行测试」。
@@ -103,16 +155,27 @@ python3 backend/server.py --port 8000
 并输出整片磨损分布。
 
 ## 架构链路
+
 ```
 前端(浏览器) → 后端 API(Python)
                 ├─ 代码生成引擎(generator.py) → 导出 zip 库包
                 ├─ 导入校验(importer.py)     → 解压/校验/编译运行/注册
                 └─ 仿真服务                    → 编译运行 C 测试程序 → 模拟基座 → BIN 物理介质
 ```
+
+后端模块职责：
+
+- `registry.py`：框架注册表（元数据：源码组成/编译参数/测试项/schema），
+  被 `server.py`、测试脚本共享，新增框架只改此处。
+- `server.py`：HTTP 服务 + 编译运行 + SSE 流式推送（纯标准库）。
+- `generator.py`：导出库包生成。
+- `importer.py`：导入 zip 校验与注册。
+
 所有生成的 C 库均可脱离本平台，直接移植到真实 MCU Flash 驱动（仅需将
 `flash_sim_*` 替换为真实驱动实现，见包内 `PORTING.md`）。
 
 ## 包格式（导入契约）
+
 ```
 xxx_library.zip
 ├── <lib>.c / <lib>.h   核心库（平台无关，可能含多个 .c）
@@ -121,17 +184,21 @@ xxx_library.zip
 └── manifest.json       { id, name, requires:"flash_sim", entry, lib,
                           lib_sources:[...], params }
 ```
+
 导入校验规则：缺 manifest、requires≠flash_sim、源码未依赖 flash_sim.h、
 或编译/运行自带自检失败，均会被拒绝并给出原因。开源组件（easyflash/flashdb）
 导出包内含上游多源文件，运行时会一并编译 `lib_sources` 列出的库源。
 
 ## 完成状态
+
 - [x] 模块一 模拟基座（NOR/NAND/EEPROM + BIN 落盘自检 + **可配置类型/容量/块大小/寿命/速度/坏块** + 性能与磨损统计 + 磨损分布导出）
 - [x] 模块二 自研 KV/NVS 框架（掉电安全 + CRC + 压实 GC + **功能压测模式：条目数/长度/修改频率/数据丢失/阻塞耗时**）+ 运行验证
 - [x] 模块二 开源 KV 组件 **EasyFlash**（EF NG 模式 ENV/KV：磨损均衡 + 掉电保护 + GC），可切换、可独立导出，模拟基座验证 0 擦写/GC 错误
 - [x] 模块二 开源 KV 组件 **FlashDB**（KVDB + FAL：磨损均衡 + 掉电保护 + GC + blob/遍历），模拟基座验证 0 擦写/GC 错误
 - [x] 模块二 裸机结构体配置框架（A/B 双备份 + CRC32 + 单调序号掉电恢复 + 磨损分摊），模拟基座验证 0 数据丢失
+- [x] 模块二 开源组件 **fast_flashdb_table**（轻量表存储：建表/按索引读写/追加/删除/GC/掉电重放），经移植层对接模拟基座运行验证通过
 - [x] 模块三 代码生成引擎（导出库包：.c/.h + 移植说明，支持 kv/simulator/easyflash/flashdb/baremetal）+ 导入闭环校验
 - [x] 模块四 前端模拟运行界面（选框架 / **配置化表单（基座+测试）** / 性能统计卡片 / **磨损柱状图** / 生成下载 / 导入验证）
+- [x] 工程化 统一测试脚本（`scripts/run_tests.sh` 一键跑全部 8 项测试）、框架注册表独立（`backend/registry.py`）
 - [ ] 模块三 AI 接口（规划中，本次未实现）
 - [ ] 模块二 文件系统 / OTA 差分框架（规划中）

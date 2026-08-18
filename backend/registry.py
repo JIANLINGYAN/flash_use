@@ -1,0 +1,332 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+backend/registry.py - 框架注册表（模块三：框架元数据集中管理）
+
+职责：集中描述本平台所有可测试框架的元信息（展示名、源码组成、编译
+include 路径、测试工作目录、可配置项 schema、测试项清单），供
+server.py 的 /api/frameworks 与编译运行逻辑消费。
+
+新增框架步骤：
+  1. 在 frameworks/<name>/ 下放置框架源码与 test/main_*.c；
+  2. 在本文件 FRAMEWORKS 末尾追加一条注册记录；
+  3. （可选）在 generator.py 的 RECIPES 追加配方以支持导出。
+
+本文件只包含数据与纯查询函数，不含任何 HTTP / 编译 / IO 逻辑。
+"""
+
+# ---------------------------------------------------------------------------
+# 模拟基座可配置项 -> 环境变量名（所有框架共用，注入到测试程序）
+# ---------------------------------------------------------------------------
+SIM_ENV_MAP = {
+    "type": "SIM_TYPE",
+    "total": "SIM_TOTAL",
+    "erase_size": "SIM_ERASE",
+    "write_size": "SIM_WRITE",
+    "read_us": "SIM_RD_US",
+    "write_us": "SIM_WR_US",
+    "erase_us": "SIM_ERASE_US",
+    "erase_cycles": "SIM_CYCLES",
+    "bad_blocks": "SIM_BAD_N",
+    "bad_ratio": "SIM_BAD_R",
+}
+# 视为"未配置、跳过注入"的值。仅作用于数值字段，避免把 schema 中的
+# 0 占位默认（"按类型默认"）注入环境变量后被 C 程序当成合法值覆盖兜底。
+# type 字段独立于本集合，始终注入。
+_SIM_SKIP_IF_ZERO = {
+    "total", "erase_size", "write_size", "erase_cycles",
+    "read_us", "write_us", "erase_us",
+    "bad_blocks", "bad_ratio",
+}
+# KV 测试可配置项 -> 环境变量名
+KV_ENV_MAP = {
+    "capacity": "KV_CAPACITY",
+    "rounds": "KV_ROUNDS",
+    "tests": "KV_TESTS",   # 数组 -> 逗号拼接
+    "items": "KV_ITEMS",   # 数组 -> LEN,N,FREQ;... 拼接
+}
+
+# ---------------------------------------------------------------------------
+# 配置项 schema（前端渲染表单用）：group 区分"模拟基座"与"测试"
+# 数值字段的 default 是该字段在"默认类型(NOR)"下的硬件合理值，
+# 便于用户开箱即用。type 切换时由前端按 SIM_TYPE_DEFAULTS 刷新
+# 其他字段的当前值。
+# 后端注入时，对 0 值视为"按类型默认"（不注入到 C 程序环境），
+# 让 C 程序走自身兜底或模拟器 FLASH_CFG_DEFAULTS_BY_TYPE。
+# ---------------------------------------------------------------------------
+SIM_TYPE_DEFAULTS = {
+    # key            NOR                      NAND                       EEPROM
+    "total":         (64 * 1024,             128 * 1024 * 1024,           32 * 1024),
+    "erase_size":    (4 * 1024,              128 * 1024,                  0),         # EEPROM 无擦除
+    "write_size":    (1,                     1,                            1),
+    "erase_cycles":  (100000,                100000,                       1000000),
+    "read_us":       (50,                    100,                          50),
+    "write_us":      (200,                   500,                          500),
+    "erase_us":      (40000,                 3000,                         0),         # EEPROM 无擦除
+    "bad_blocks":    (0,                     0,                            0),
+    "bad_ratio":     (0,                     0,                            0),
+}
+
+SIM_CONFIG_SCHEMA = [
+    {"key": "type", "label": "存储介质类型", "type": "select",
+     "options": [["0", "NOR"], ["1", "NAND"], ["2", "EEPROM"]], "default": "0",
+     "group": "simulator"},
+    {"key": "total", "label": "总容量(字节)", "type": "number",
+     "default": SIM_TYPE_DEFAULTS["total"][0], "min": 0, "step": 1024,
+     "group": "simulator"},
+    {"key": "erase_size", "label": "擦除块大小(字节)", "type": "number",
+     "default": SIM_TYPE_DEFAULTS["erase_size"][0], "min": 0, "step": 256,
+     "group": "simulator"},
+    {"key": "write_size", "label": "最小写入单位(字节)", "type": "number",
+     "default": SIM_TYPE_DEFAULTS["write_size"][0], "min": 1, "step": 1,
+     "group": "simulator"},
+    {"key": "erase_cycles", "label": "标称擦写寿命(次)", "type": "number",
+     "default": SIM_TYPE_DEFAULTS["erase_cycles"][0], "min": 0, "step": 1000,
+     "group": "simulator"},
+    {"key": "read_us", "label": "读耗时(us/次)", "type": "number",
+     "default": SIM_TYPE_DEFAULTS["read_us"][0], "min": 0, "step": 1,
+     "group": "simulator"},
+    {"key": "write_us", "label": "写耗时(us/次)", "type": "number",
+     "default": SIM_TYPE_DEFAULTS["write_us"][0], "min": 0, "step": 1,
+     "group": "simulator"},
+    {"key": "erase_us", "label": "擦除耗时(us/次)", "type": "number",
+     "default": SIM_TYPE_DEFAULTS["erase_us"][0], "min": 0, "step": 1,
+     "group": "simulator"},
+    {"key": "bad_blocks", "label": "固定坏块数量", "type": "number",
+     "default": SIM_TYPE_DEFAULTS["bad_blocks"][0], "min": 0, "step": 1,
+     "group": "simulator"},
+    {"key": "bad_ratio", "label": "运行时坏块比率(万分之)", "type": "number",
+     "default": SIM_TYPE_DEFAULTS["bad_ratio"][0], "min": 0, "max": 10000,
+     "step": 1, "group": "simulator"},
+]
+
+
+# ---------------------------------------------------------------------------
+# 框架注册表：描述每个可测试框架的源码组成与编译方式。
+# 每个框架：
+#   id        唯一标识
+#   name      展示名
+#   desc      简介
+#   sources   参与编译的 C 源文件（相对项目根）
+#   includes  编译 -I 包含目录（相对项目根）
+#   workdir   测试运行时的工作目录（用于放置 BIN，相对项目根）
+#   config_schema / test_schema / test_items  前端表单与测试项
+# ---------------------------------------------------------------------------
+FRAMEWORKS = [
+    {
+        "id": "simulator",
+        "name": "模拟基座 (NOR/NAND/EEPROM)",
+        "desc": "Flash 物理特性模拟：按块擦除、写入仅允许 1->0、EEPROM 字节写、"
+                "寿命统计、坏块模拟。可配置类型/容量/块大小/速度/坏点。",
+        "sources": ["simulator/flash_sim.c", "simulator/test/main_sim.c"],
+        "includes": ["simulator"],
+        "workdir": "simulator/test",
+        "config_schema": SIM_CONFIG_SCHEMA,
+        "test_schema": [],
+        "test_env": {"tests": "SIM_TESTS"},
+        "test_items": [
+            {"id": "basic", "label": "基础擦除/写/读语义"},
+            {"id": "badblock", "label": "坏块拒绝(NAND)"},
+            {"id": "wear", "label": "磨损统计/磨损均衡"},
+            {"id": "powerloss", "label": "掉电重放持久化"},
+        ],
+    },
+    {
+        "id": "kv",
+        "name": "KV/NVS 存储框架",
+        "desc": "基于模拟基座的键值存储：两步提交掉电安全、CRC 校验、后写覆盖、"
+                "删除、压实垃圾回收。支持功能压测（条目数/长度/修改频率）。",
+        "sources": [
+            "simulator/flash_sim.c",
+            "frameworks/kv/kv_store.c",
+            "frameworks/kv/test/main_kv.c",
+        ],
+        "includes": ["simulator", "frameworks/kv"],
+        "workdir": "frameworks/kv/test",
+        "config_schema": SIM_CONFIG_SCHEMA,
+        "test_schema": [
+            {"key": "capacity", "label": "KV 区容量(字节)", "type": "number",
+             "default": 8192, "min": 1024, "step": 1024, "group": "test"},
+            {"key": "rounds", "label": "功能压测轮数", "type": "number",
+             "default": 20, "min": 1, "step": 1, "group": "test"},
+        ],
+        "test_items": [
+            {"id": "write_read", "label": "基础写入/读取"},
+            {"id": "update", "label": "更新覆盖"},
+            {"id": "delete", "label": "删除"},
+            {"id": "powerloss", "label": "掉电残留丢弃"},
+            {"id": "gc", "label": "压实 GC"},
+            {"id": "func", "label": "功能压测(条目表)"},
+        ],
+    },
+    {
+        "id": "easyflash",
+        "name": "EasyFlash (ENV/KV 开源组件)",
+        "desc": "成熟开源 KV 框架（armink/EasyFlash V4.x NG 模式）：内置磨损均衡、"
+                "掉电保护（状态表多阶段提交）与垃圾回收。通过 ef_port 适配本平台"
+                "模拟基座，可独立导出使用。",
+        "sources": [
+            "simulator/flash_sim.c",
+            "frameworks/easyflash/ef_port.c",
+            "frameworks/easyflash/vendor/src/ef_env.c",
+            "frameworks/easyflash/vendor/src/ef_utils.c",
+            "frameworks/easyflash/vendor/src/easyflash.c",
+            "frameworks/easyflash/test/main_easyflash.c",
+        ],
+        "includes": [
+            "simulator",
+            "frameworks/easyflash",
+            "frameworks/easyflash/vendor/inc",
+        ],
+        "workdir": "frameworks/easyflash/test",
+        "config_schema": SIM_CONFIG_SCHEMA,
+        "test_schema": [
+            {"key": "capacity", "label": "ENV 区容量(字节)", "type": "number",
+             "default": 8192, "min": 2048, "step": 1024, "group": "test"},
+            {"key": "rounds", "label": "功能压测轮数", "type": "number",
+             "default": 20, "min": 1, "step": 1, "group": "test"},
+        ],
+        "test_items": [
+            {"id": "write_read", "label": "基础写入/读取"},
+            {"id": "update", "label": "更新覆盖"},
+            {"id": "delete", "label": "删除"},
+            {"id": "powerloss", "label": "掉电安全"},
+            {"id": "gc", "label": "垃圾回收"},
+            {"id": "types", "label": "多类型数据"},
+            {"id": "func", "label": "功能压测(条目表)"},
+        ],
+    },
+    {
+        "id": "flashdb",
+        "name": "FlashDB (KVDB 开源组件)",
+        "desc": "EasyFlash 作者的下一代作品（armink/FlashDB），KVDB 同样具备磨损均衡、"
+                "掉电保护与垃圾回收，并支持 blob 接口。通过 FAL 移植层对接模拟基座。",
+        "sources": [
+            "simulator/flash_sim.c",
+            "frameworks/flashdb/fal_flash_sim_port.c",
+            "frameworks/flashdb/vendor/src/fdb.c",
+            "frameworks/flashdb/vendor/src/fdb_utils.c",
+            "frameworks/flashdb/vendor/src/fdb_kvdb.c",
+            "frameworks/flashdb/vendor/src/fdb_tsdb.c",
+            "frameworks/flashdb/vendor/src/fdb_file.c",
+            "frameworks/flashdb/vendor/fal/src/fal.c",
+            "frameworks/flashdb/vendor/fal/src/fal_flash.c",
+            "frameworks/flashdb/vendor/fal/src/fal_partition.c",
+            "frameworks/flashdb/test/main_flashdb.c",
+        ],
+        "includes": [
+            "simulator",
+            "frameworks/flashdb",
+            "frameworks/flashdb/vendor/inc",
+            "frameworks/flashdb/vendor/fal/inc",
+        ],
+        "workdir": "frameworks/flashdb/test",
+        "config_schema": SIM_CONFIG_SCHEMA,
+        "test_schema": [
+            {"key": "capacity", "label": "KVDB 分区容量(字节)", "type": "number",
+             "default": 8192, "min": 2048, "step": 1024, "group": "test"},
+            {"key": "rounds", "label": "功能压测轮数", "type": "number",
+             "default": 20, "min": 1, "step": 1, "group": "test"},
+        ],
+        "test_items": [
+            {"id": "write_read", "label": "基础写入/读取"},
+            {"id": "update", "label": "更新覆盖"},
+            {"id": "delete", "label": "删除"},
+            {"id": "powerloss", "label": "掉电安全"},
+            {"id": "gc", "label": "垃圾回收"},
+            {"id": "types", "label": "多类型数据"},
+            {"id": "iterate", "label": "遍历迭代"},
+            {"id": "func", "label": "功能压测(条目表)"},
+        ],
+    },
+    {
+        "id": "baremetal",
+        "name": "裸机结构体配置 (A/B 双备份 + CRC)",
+        "desc": "最简单的裸机架构：把业务结构体整块映射到 Flash，A/B 双分区交替备份，"
+                "CRC32 校验 + 单调序号掉电恢复，无需序列化。附带磨损统计。",
+        "sources": [
+            "simulator/flash_sim.c",
+            "frameworks/baremetal/bm_config.c",
+            "frameworks/baremetal/test/main_baremetal.c",
+        ],
+        "includes": [
+            "simulator",
+            "frameworks/baremetal",
+        ],
+        "workdir": "frameworks/baremetal/test",
+        "config_schema": SIM_CONFIG_SCHEMA,
+        "test_schema": [
+            {"key": "rounds", "label": "func 压测保存次数", "type": "number",
+             "default": 200, "min": 1, "step": 1, "group": "test"},
+        ],
+        "test_items": [
+            {"id": "write_read", "label": "结构体保存/读取"},
+            {"id": "update", "label": "多次更新读最新"},
+            {"id": "ab_rotate", "label": "A/B 分区交替"},
+            {"id": "powerloss", "label": "掉电回退恢复"},
+            {"id": "corrupt", "label": "坏块自动恢复"},
+            {"id": "factory", "label": "恢复出厂"},
+            {"id": "func", "label": "高频保存压测"},
+        ],
+    },
+    # ---- fast_flashdb_table（轻量 KV/表组件，用户开源组件）----
+    {
+        "id": "fastflash",
+        "_comment": "用户开源组件 fast_flashdb_table：轻量表存储，仅依赖 flash_ops_t 移植接口；"
+                    "vendor 源码零修改，移植层对接 simulator 模拟基座",
+        "name": "fast_flashdb_table 组件",
+        "desc": "轻量表存储组件，支持建表/按索引读写/追加/删除/GC/掉电重放。对接本平台模拟基座。",
+        "open_source": True,
+        "vendor": "JIANLINGYAN/fast_flashdb_table",
+        "repo": "https://github.com/JIANLINGYAN/fast_flashdb_table",
+        "sources": [
+            "simulator/flash_sim.c",
+            "frameworks/fastflash/vendor/fast_flashdb_table/core/fast_flash_core.c",
+            "frameworks/fastflash/vendor/fast_flashdb_table/core/fast_flash_log.c",
+            "frameworks/fastflash/fastflash_sim_port.c",
+            "frameworks/fastflash/test/main_fastflash.c",
+        ],
+        "includes": [
+            "simulator",
+            "frameworks/fastflash",
+            "frameworks/fastflash/vendor/fast_flashdb_table/core",
+        ],
+        "workdir": "frameworks/fastflash/test",
+        "config_schema": SIM_CONFIG_SCHEMA,
+        "default_env": {
+            "type": "0",          # 0=NOR 1=NAND 2=EEPROM（与模拟基座一致）
+            "total": "64*1024",
+            "erase_size": "4096",
+            "write_size": "1",
+            "read_us": "50",
+            "write_us": "200",
+            "erase_us": "40000",
+            "erase_cycles": "100000",
+            "bad_blocks": "0",
+            "bad_ratio": "0",
+        },
+        "default_config": {"type": 0, "total": 65536, "erase_size": 4096,
+                           "write_size": 1, "read_us": 50, "write_us": 200,
+                           "erase_us": 40000, "erase_cycles": 100000,
+                           "bad_blocks": 0, "bad_ratio": 0},
+        "test_env": {"tests": "FLT_TESTS"},
+        "test_items": [
+            {"id": "init", "label": "初始化/建表"},
+            {"id": "write_read", "label": "基础写入/读取"},
+            {"id": "append", "label": "追加/计数"},
+            {"id": "update", "label": "按索引覆盖"},
+            {"id": "delete", "label": "删除表"},
+            {"id": "gc", "label": "垃圾回收"},
+            {"id": "powerloss", "label": "掉电重放"},
+        ],
+    },
+    # 后续框架（fs / ota）在此追加注册即可被前端发现
+]
+
+
+def get_framework(fid):
+    """按 id 查找框架注册项；未找到返回 None。"""
+    for f in FRAMEWORKS:
+        if f["id"] == fid:
+            return f
+    return None

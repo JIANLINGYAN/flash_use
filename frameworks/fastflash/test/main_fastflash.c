@@ -189,6 +189,9 @@ int main(void)
     printf("=== fast_flashdb_table 组件运行验证 ===\n");
 
     uint32_t total = (uint32_t)env_long("SIM_TOTAL", 64 * 1024);
+    /* 删除上次运行残留的介质文件，保证每次从全新介质开始
+     * （与 kv/easyflash/flashdb 测试的"整区擦除"语义一致，测试可重复运行） */
+    remove(FLT_BIN);
     if (fast_flash_sim_init_device(FLT_BIN) != 0) {
         printf("  [FAIL] 模拟基座初始化失败!\n");
         return 1;
